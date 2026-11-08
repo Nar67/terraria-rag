@@ -1,0 +1,14 @@
+# Downloaded wiki data (rebuild with: python3 download.py)
+text/
+html/
+manifest.jsonl
+download.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local notes
+NEXT_STEPS.md
