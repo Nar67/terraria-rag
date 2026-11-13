@@ -3,6 +3,7 @@ text/
 html/
 manifest.jsonl
 download.log
+chunks.jsonl
 
 # Python
 __pycache__/
