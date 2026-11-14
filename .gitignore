@@ -1,7 +1,6 @@
-# Downloaded wiki data (rebuild with: python3 download.py)
+# Downloaded wiki data (rebuild with: uv run download.py)
 text/
 html/
-manifest.jsonl
 download.log
 chunks.jsonl
 

@@ -11,7 +11,7 @@ sitemap (the API and Special: pages are off-limits), only /wiki/ article
 pages are fetched, one request per --delay seconds (default 1).
 
 For each page it writes text/<Title>.md (extract.py's output, with the
-source URL and licence under the title) and adds a line to manifest.jsonl.
+source URL and licence under the title).
 Run it again at any time: pages whose text file is newer than the page's
 last edit are skipped, so an interrupted run resumes and a later run only
 fetches pages that changed. --keep-html also stores the page's HTML,
@@ -24,7 +24,6 @@ share alike). The site's signals forbid AI training on it (ai-train=no).
 """
 import argparse
 import gzip
-import json
 import logging
 import re
 import sys
@@ -32,7 +31,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -151,6 +150,14 @@ def atomic_write(path, data):
     tmp.replace(path)
 
 
+def page_url(title):
+    """The wiki URL of a page title as the sitemap lists it ("0x33's_Aviators").
+
+    Apostrophes are percent-encoded, while ":", "(", ")", "," and "!" are
+    not; checked against all 4,107 sitemap URLs."""
+    return f"{BASE}/wiki/" + urllib.parse.quote(title.replace(" ", "_"), safe="/:(),!")
+
+
 def page_text(html, url):
     """extract.py's Markdown with the source URL and licence under the title."""
     page_title, text = extract(html.decode("utf-8", errors="replace"))
@@ -164,18 +171,10 @@ def rebuild_from_html(out):
     files = sorted(html_dir.glob("*.html.gz"))
     if not files:
         sys.exit("no saved HTML in html/; download once with --keep-html first")
-    urls = {}  # file name -> source URL, latest manifest entry wins
-    manifest = out / "manifest.jsonl"
-    if manifest.exists():
-        for line in manifest.open(encoding="utf-8"):
-            entry = json.loads(line)
-            urls[file_name(entry["title"])] = entry["url"]
     text_dir.mkdir(parents=True, exist_ok=True)
     for i, f in enumerate(files, 1):
         name = f.name[:-len(".html.gz")]
-        url = urls.get(name) or f"{BASE}/wiki/" + urllib.parse.quote(
-            name.replace("%2F", "/").replace(" ", "_"), safe="/:'(),!")
-        _, text = page_text(gzip.decompress(f.read_bytes()), url)
+        _, text = page_text(gzip.decompress(f.read_bytes()), page_url(name.replace("%2F", "/")))
         atomic_write(text_dir / (name + ".md"), text.encode("utf-8"))
         if i % 500 == 0:
             log.info(f"{i}/{len(files)} pages")
@@ -218,7 +217,6 @@ def main():
     text_dir.mkdir(parents=True, exist_ok=True)
     if args.keep_html:
         html_dir.mkdir(parents=True, exist_ok=True)
-    manifest = (args.out / "manifest.jsonl").open("a", encoding="utf-8")
 
     todo = []
     for title, url, lastmod in pages:
@@ -233,7 +231,7 @@ def main():
     if args.limit:
         todo = todo[:args.limit]
     log.info(f"{len(pages)} pages listed, {up_to_date} up to date, "
-          f"{len(todo)} to fetch now (about {len(todo) * delay / 60:.0f} min)")
+             f"{len(todo)} to fetch now (about {len(todo) * delay / 60:.0f} min)")
 
     done = failed = 0
     start = time.monotonic()
@@ -251,17 +249,11 @@ def main():
                 log.warning(f"[{i}/{len(todo)}] {title}: not found, skipped")
                 failed += 1
                 continue
-            html, final_url = got
-            page_title, text = page_text(html, url)
+            html, _final_url = got
+            _, text = page_text(html, url)
             atomic_write(path, text.encode("utf-8"))
             if args.keep_html:  # written last: its time marks the page as done
                 atomic_write(html_dir / (file_name(title) + ".html.gz"), gzip.compress(html))
-            manifest.write(json.dumps({
-                "title": title, "page_title": page_title, "url": url, "final_url": final_url,
-                "file": str(path.relative_to(args.out)), "bytes": len(text.encode()),
-                "fetched": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            }, ensure_ascii=False) + "\n")
-            manifest.flush()
             done += 1
             if i % 25 == 0 or i == len(todo):
                 left = (time.monotonic() - start) / i * (len(todo) - i)
@@ -270,8 +262,6 @@ def main():
         log.warning("stopped; run again to continue where it left off")
     except Blocked as e:
         log.error(str(e))
-    finally:
-        manifest.close()
     log.info(f"saved {done} pages, {failed} failed or missing")
 
 
