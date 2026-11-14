@@ -23,6 +23,7 @@ template supports it (Qwen3 and similar, via "chat_template_kwargs"). Without
 either flag nothing extra is sent and the server's default applies.
 """
 import argparse
+import logging
 import os
 import re
 import sys
@@ -30,7 +31,10 @@ import sys
 import openai
 from openai import OpenAI
 
+from config import add_logging_args, setup_logging
 from search import Searcher, wants_history
+
+log = logging.getLogger("rag.ask")
 
 LLM_URL = os.environ.get("RAG_LLM_URL", "http://localhost:8000/v1")
 LLM_MODEL = os.environ.get("RAG_LLM_MODEL")  # None: ask the server
@@ -219,7 +223,9 @@ def main():
     ap.add_argument("--temperature", type=float, default=0.2)
     ap.add_argument("--show-sources", action="store_true", help="list the retrieved chunks before the answer")
     ap.add_argument("--dry-run", action="store_true", help="print the prompt and stop; no model needed")
+    add_logging_args(ap)
     args = ap.parse_args()
+    setup_logging(args)
 
     searcher = Searcher()
     client = OpenAI(base_url=LLM_URL, api_key=os.environ.get("RAG_LLM_KEY", "none"),
@@ -244,7 +250,8 @@ def main():
     if args.question:
         error = run(" ".join(args.question))
         if error:
-            sys.exit(error)
+            log.error(error)
+            sys.exit(1)
         return
     print("Ask about Terraria (empty line or Ctrl-D to quit).")
     while True:
@@ -261,7 +268,7 @@ def main():
             print("\n(stopped)")
             continue
         if error:
-            print(f"error: {error}")
+            log.error(error)
 
 
 if __name__ == "__main__":

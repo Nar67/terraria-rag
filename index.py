@@ -16,8 +16,10 @@ the last run is not embedded again, chunks that no longer exist are deleted,
 and an interrupted run keeps the batches it finished. The BM25 index is
 rebuilt in full each time; that takes seconds.
 """
+import argparse
 import hashlib
 import json
+import logging
 import shutil
 import sys
 import time
@@ -25,10 +27,12 @@ import time
 import bm25s
 from fastembed import TextEmbedding
 
-from config import BM25_DIR, BM25_META, CHUNKS, EMBED_MODEL
+from config import BM25_DIR, BM25_META, CHUNKS, EMBED_MODEL, add_logging_args, setup_logging
 from search import bm25_tokenize, open_collection
 
 BATCH = 256  # chunks embedded and stored per step
+
+log = logging.getLogger("rag.index")
 
 
 def text_hash(text):
@@ -61,8 +65,8 @@ def build_vectors(records, build):
         collection.delete(ids=stale[i:i + 5000])
 
     todo = [r for r in records if stored_hash.get(r["id"]) != text_hash(r["text"])]
-    print(f"vectors: {len(records) - len(todo)} chunks up to date, {len(todo)} to embed, "
-          f"{len(stale)} removed", file=sys.stderr)
+    log.info(f"vectors: {len(records) - len(todo)} chunks up to date, {len(todo)} to embed, "
+             f"{len(stale)} removed")
     if todo:
         embed(collection, todo)
     collection.modify(metadata={"model": EMBED_MODEL, "build": build})
@@ -84,8 +88,7 @@ def embed(collection, todo):
         )
         done = i + len(batch)
         rate = done / (time.time() - start)
-        print(f"  {done}/{len(todo)} embedded, {rate:.0f}/s, about {(len(todo) - done) / rate / 60:.0f} min left",
-              file=sys.stderr)
+        log.info(f"{done}/{len(todo)} embedded, {rate:.0f}/s, about {(len(todo) - done) / rate / 60:.0f} min left")
 
 
 def build_bm25(records, build):
@@ -105,10 +108,13 @@ def build_bm25(records, build):
     if BM25_DIR.exists():
         shutil.rmtree(BM25_DIR)
     tmp.rename(BM25_DIR)
-    print(f"bm25: indexed {len(records)} chunks", file=sys.stderr)
+    log.info(f"bm25: indexed {len(records)} chunks")
 
 
 def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    add_logging_args(ap)
+    setup_logging(ap.parse_args())
     if not CHUNKS.exists():
         sys.exit("chunks.jsonl not found; run: uv run chunk.py")
     data = CHUNKS.read_bytes()
@@ -120,7 +126,7 @@ def main():
     build = hashlib.sha1(EMBED_MODEL.encode() + b"\0" + data).hexdigest()[:16]
     build_vectors(records, build)  # slow and resumable, so first
     build_bm25(records, build)
-    print(f"done (build {build})", file=sys.stderr)
+    log.info(f"done (build {build})")
 
 
 if __name__ == "__main__":

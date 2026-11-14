@@ -25,6 +25,7 @@ share alike). The site's signals forbid AI training on it (ai-train=no).
 import argparse
 import gzip
 import json
+import logging
 import re
 import sys
 import time
@@ -35,7 +36,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from config import add_logging_args, setup_logging  # noqa: E402
 from extract import extract  # noqa: E402  (extract.py sits next to this script)
+
+log = logging.getLogger("rag.download")
 
 BASE = "https://terraria.wiki.gg"
 SITEMAP_INDEX = f"{BASE}/sitemaps/sitemap-index-terraria_en.xml"
@@ -86,14 +90,14 @@ class Fetcher:
                 if e.code in (429, 500, 502, 503, 504) and attempt < tries:
                     retry = e.headers.get("Retry-After")
                     sleep_for = int(retry) if retry and retry.isdigit() else wait
-                    print(f"    HTTP {e.code}, waiting {sleep_for}s", file=sys.stderr)
+                    log.warning(f"HTTP {e.code}, waiting {sleep_for}s")
                     time.sleep(sleep_for)
                     wait *= 2
                     continue
                 raise
             except (urllib.error.URLError, TimeoutError) as e:
                 if attempt < tries:
-                    print(f"    {e}, waiting {wait}s", file=sys.stderr)
+                    log.warning(f"{e}, waiting {wait}s")
                     time.sleep(wait)
                     wait *= 2
                     continue
@@ -174,8 +178,8 @@ def rebuild_from_html(out):
         _, text = page_text(gzip.decompress(f.read_bytes()), url)
         atomic_write(text_dir / (name + ".md"), text.encode("utf-8"))
         if i % 500 == 0:
-            print(f"{i}/{len(files)} pages", file=sys.stderr)
-    print(f"re-extracted {len(files)} pages into text/", file=sys.stderr)
+            log.info(f"{i}/{len(files)} pages")
+    log.info(f"re-extracted {len(files)} pages into text/")
 
 
 def main():
@@ -189,7 +193,9 @@ def main():
     ap.add_argument("--list", action="store_true", help="print the page list and exit")
     ap.add_argument("--from-html", action="store_true",
                     help="re-extract text/ from the saved html/ only; no downloading")
+    add_logging_args(ap)
     args = ap.parse_args()
+    setup_logging(args)
 
     if args.from_html:
         rebuild_from_html(args.out)
@@ -204,7 +210,7 @@ def main():
     if args.list:
         for title, url, lastmod in pages:
             print(title)
-        print(f"{len(pages)} pages", file=sys.stderr)
+        log.info(f"{len(pages)} pages")
         return
 
     text_dir = args.out / "text"
@@ -226,8 +232,8 @@ def main():
     up_to_date = len(pages) - len(todo)
     if args.limit:
         todo = todo[:args.limit]
-    print(f"{len(pages)} pages listed, {up_to_date} up to date, "
-          f"{len(todo)} to fetch now (about {len(todo) * delay / 60:.0f} min)", file=sys.stderr)
+    log.info(f"{len(pages)} pages listed, {up_to_date} up to date, "
+          f"{len(todo)} to fetch now (about {len(todo) * delay / 60:.0f} min)")
 
     done = failed = 0
     start = time.monotonic()
@@ -238,11 +244,11 @@ def main():
             except Blocked:
                 raise
             except Exception as e:  # one bad page must not stop the run
-                print(f"[{i}/{len(todo)}] {title}: failed ({e})", file=sys.stderr)
+                log.warning(f"[{i}/{len(todo)}] {title}: failed ({e})")
                 failed += 1
                 continue
             if got is None:
-                print(f"[{i}/{len(todo)}] {title}: not found, skipped", file=sys.stderr)
+                log.warning(f"[{i}/{len(todo)}] {title}: not found, skipped")
                 failed += 1
                 continue
             html, final_url = got
@@ -259,14 +265,14 @@ def main():
             done += 1
             if i % 25 == 0 or i == len(todo):
                 left = (time.monotonic() - start) / i * (len(todo) - i)
-                print(f"[{i}/{len(todo)}] {title}  ({left / 60:.0f} min left)", file=sys.stderr)
+                log.info(f"[{i}/{len(todo)}] {title}  ({left / 60:.0f} min left)")
     except KeyboardInterrupt:
-        print("\nstopped; run again to continue where it left off", file=sys.stderr)
+        log.warning("stopped; run again to continue where it left off")
     except Blocked as e:
-        print(f"\n{e}", file=sys.stderr)
+        log.error(str(e))
     finally:
         manifest.close()
-    print(f"saved {done} pages, {failed} failed or missing", file=sys.stderr)
+    log.info(f"saved {done} pages, {failed} failed or missing")
 
 
 if __name__ == "__main__":

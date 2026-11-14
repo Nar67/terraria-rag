@@ -10,11 +10,13 @@ separated by " | "). Navigation boxes, images, the table of contents, edit
 links, references and platform icons are dropped.
 """
 import argparse
+import logging
 import re
-import sys
 from pathlib import Path
 
 from bs4 import BeautifulSoup, Comment, NavigableString, Tag
+
+log = logging.getLogger("rag.extract")
 
 # Elements that carry no article content.
 DROP_SELECTORS = [
@@ -391,16 +393,20 @@ def extract(html):
 
 
 def main():
+    from config import add_logging_args, setup_logging  # only the command line needs it
+
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("files", nargs="+", type=Path)
     ap.add_argument("-o", "--outdir", type=Path, default=Path("text"))
+    add_logging_args(ap)
     args = ap.parse_args()
+    setup_logging(args)
     args.outdir.mkdir(parents=True, exist_ok=True)
     for f in args.files:
         title, text = extract(f.read_text(encoding="utf-8"))
         out = args.outdir / (f.stem + ".md")
         out.write_text(text, encoding="utf-8")
-        print(f"{f.name}: {f.stat().st_size:,} B html -> {len(text.encode()):,} B text ({title})", file=sys.stderr)
+        log.info(f"{f.name}: {f.stat().st_size:,} B html -> {len(text.encode()):,} B text ({title})")
 
 
 if __name__ == "__main__":

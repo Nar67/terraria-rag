@@ -28,28 +28,44 @@ How a page is split:
 import argparse
 import hashlib
 import json
+import logging
 import re
 import statistics
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from huggingface_hub import hf_hub_download
 from tokenizers import Tokenizer
 
-from config import CHUNKS, EMBED_MAX_TOKENS, EMBED_MODEL, HERE, TEXT_DIR
+from config import CHUNKS, EMBED_MAX_TOKENS, EMBED_MODEL, HERE, TEXT_DIR, add_logging_args, setup_logging
+
+log = logging.getLogger("rag.chunk")
 
 HEADING = re.compile(r"^(#{2,6})\s+(.*\S)\s*$")
 SENTENCE_END = re.compile(r"(?<=[.!?…])\s+")
 BLANK_LINES = re.compile(r"\n\s*\n")
 
-_tok = Tokenizer.from_pretrained(EMBED_MODEL)
-_tok.no_truncation()
-_tok.no_padding()
+_tok = None
+
+
+def tokenizer():
+    """The embedding model's tokenizer, loaded on first use.
+
+    Fetched through huggingface_hub (cached after the first run) rather than
+    Tokenizer.from_pretrained, whose own downloader prints a warning that
+    logging cannot silence."""
+    global _tok
+    if _tok is None:
+        _tok = Tokenizer.from_file(hf_hub_download(EMBED_MODEL, "tokenizer.json"))
+        _tok.no_truncation()
+        _tok.no_padding()
+    return _tok
 
 
 def ntok(text):
     """Token count as the model sees it, including [CLS] and [SEP]."""
-    return len(_tok.encode(text).ids)
+    return len(tokenizer().encode(text).ids)
 
 
 @dataclass
@@ -133,7 +149,7 @@ def hard_split(header, text, limit):
     budget = limit - ntok(compose(header, ""))
     if budget < 16:
         raise ValueError(f"context path too long to leave room for text: {header!r}")
-    offsets = _tok.encode(text, add_special_tokens=False).offsets
+    offsets = tokenizer().encode(text, add_special_tokens=False).offsets
     pieces, i = [], 0
     while i < len(offsets):
         j = min(i + budget, len(offsets))
@@ -279,7 +295,9 @@ def main():
                     help=f"hard limit per chunk (default and maximum {EMBED_MAX_TOKENS}, the model's limit)")
     ap.add_argument("--min-tokens", type=int, default=100, help="merge chunks smaller than this (default 100)")
     ap.add_argument("--show", action="store_true", help="print the chunks instead of writing them")
+    add_logging_args(ap)
     args = ap.parse_args()
+    setup_logging(args)
 
     if args.max_tokens > EMBED_MAX_TOKENS:
         sys.exit(f"--max-tokens above {EMBED_MAX_TOKENS} would let {EMBED_MODEL} truncate chunks")
@@ -291,7 +309,7 @@ def main():
     for n, path in enumerate(files, 1):
         records += chunk_page(path.resolve(), args.max_tokens, args.min_tokens)
         if not args.show and n % 500 == 0:
-            print(f"{n}/{len(files)} pages, {len(records)} chunks", file=sys.stderr)
+            log.info(f"{n}/{len(files)} pages, {len(records)} chunks")
 
     if args.show:
         for r in records:
@@ -302,13 +320,12 @@ def main():
         with args.output.open("w", encoding="utf-8") as f:
             for r in records:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
-        print(f"wrote {len(records)} chunks from {len(files)} pages to {args.output.name}")
+        log.info(f"wrote {len(records)} chunks from {len(files)} pages to {args.output.name}")
 
     sizes = sorted(r["tokens"] for r in records)
-    print(
+    log.info(
         f"tokens per chunk: min {sizes[0]}, median {statistics.median(sizes):.0f}, "
-        f"p90 {sizes[int(len(sizes) * 0.9)]}, max {sizes[-1]} (limit {args.max_tokens})",
-        file=sys.stderr,
+        f"p90 {sizes[int(len(sizes) * 0.9)]}, max {sizes[-1]} (limit {args.max_tokens})"
     )
 
 

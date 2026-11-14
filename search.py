@@ -21,6 +21,7 @@ Needs the indexes built by index.py.
 """
 import argparse
 import json
+import logging
 import re
 import sys
 
@@ -31,7 +32,10 @@ import Stemmer
 from chromadb.config import Settings
 from fastembed import TextEmbedding
 
-from config import BM25_DIR, BM25_META, CHROMA_DIR, COLLECTION, EMBED_MODEL, QUERY_PREFIX
+from config import (BM25_DIR, BM25_META, CHROMA_DIR, COLLECTION, EMBED_MODEL, QUERY_PREFIX,
+                    add_logging_args, setup_logging)
+
+log = logging.getLogger("rag.search")
 
 RRF_K = 60  # the usual constant; larger values flatten the gap between ranks
 
@@ -73,8 +77,8 @@ class Searcher:
         if built_with and built_with != EMBED_MODEL:
             sys.exit(f"the index was built with {built_with}, config says {EMBED_MODEL}; run: uv run index.py")
         if not vec_meta.get("build") or vec_meta.get("build") != meta.get("build"):
-            print("warning: the vector and keyword indexes come from different builds "
-                  "(index.py was interrupted?); results may miss chunks. Run: uv run index.py", file=sys.stderr)
+            log.warning("the vector and keyword indexes come from different builds "
+                        "(index.py was interrupted?); results may miss chunks. Run: uv run index.py")
         self.model = TextEmbedding(EMBED_MODEL)
         self.bm25 = bm25s.BM25.load(str(BM25_DIR))
         self.bm25_ids = meta["ids"]
@@ -148,7 +152,9 @@ def main():
     group.add_argument("--no-history", dest="history", action="store_false",
                        help="never include History chunks")
     ap.add_argument("--full", action="store_true", help="print whole chunks, not the first lines")
+    add_logging_args(ap)
     args = ap.parse_args()
+    setup_logging(args)
 
     query = " ".join(args.query)
     searcher = Searcher()
