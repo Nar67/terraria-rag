@@ -39,12 +39,33 @@ log = logging.getLogger("rag.search")
 
 RRF_K = 60  # the usual constant; larger values flatten the gap between ranks
 
+# Search tuning, chosen with eval.py on eval/questions.jsonl (2026-11-14):
+# hybrid k=8 went from 93% to 100% of questions with all evidence retrieved
+# and MRR 0.69 -> 0.83. Trivia down-weighting made no difference, so it is off.
+TUNING = {"pool": 100, "vector_weight": 2.0, "title_boost": 0.5, "trivia_weight": 1.0}
+
 # Questions about versions or changes are the ones History chunks can answer.
 HISTORY_WORDS = re.compile(
     r"\b(\d+\.\d+(\.\d+)*|history|patch(es)?|updates?|versions?|changed?|changes|"
     r"added|introduced|removed|nerf(ed)?|buff(ed)?|previously|used to|when was|when were)\b",
     re.I,
 )
+
+
+def normalize(text):
+    """Lower case, letters and digits only: "Night's Edge" -> "night s edge"."""
+    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def titles_in_query(query, titles):
+    """The titles that appear as whole words in the query, longest only.
+
+    For "how do I summon the Eye of Cthulhu" both "Eye of Cthulhu" and the
+    disambiguation page "Eye" appear; only the longer one counts."""
+    q = f" {normalize(query)} "
+    found = [t for t in titles if normalize(t) and f" {normalize(t)} " in q]
+    return {t for t in found
+            if not any(o != t and f" {normalize(t)} " in f" {normalize(o)} " for o in found)}
 
 
 def wants_history(query):
@@ -99,34 +120,55 @@ class Searcher:
         docs, scores = self.bm25.retrieve(tokens, k=n, show_progress=False, weight_mask=mask)
         return [self.bm25_ids[d] for d, s in zip(docs[0], scores[0]) if s > 0]
 
-    def search(self, query, k=8, mode="hybrid", history=None, pool=50):
+    def search(self, query, k=8, mode="hybrid", history=None, pool=None,
+               vector_weight=None, title_boost=None, trivia_weight=None):
         """Top k chunks for a query, best first.
 
         history: True/False to include History chunks or not, None to decide
-        from the question. pool: how deep each ranking goes before merging.
+        from the question. The tuning knobs default to the TUNING values:
+        pool           how deep each ranking goes before merging
+        vector_weight  weight of the vector ranking in the merge (BM25 has 1)
+        title_boost    extra score, in "ranked first" units, for chunks of a
+                       page whose title is in the question
+        trivia_weight  score factor for chunks that are only Trivia
         """
+        pool = TUNING["pool"] if pool is None else pool
+        vector_weight = TUNING["vector_weight"] if vector_weight is None else vector_weight
+        title_boost = TUNING["title_boost"] if title_boost is None else title_boost
+        trivia_weight = TUNING["trivia_weight"] if trivia_weight is None else trivia_weight
         include_history = wants_history(query) if history is None else history
         rankings = {}
         if mode in ("hybrid", "vector"):
             rankings["vector"] = self.vector_ranking(query, pool, include_history)
         if mode in ("hybrid", "bm25"):
             rankings["bm25"] = self.bm25_ranking(query, pool, include_history)
+        weights = {"vector": vector_weight, "bm25": 1.0}
 
         scores, ranks = {}, {}
         for name, ids in rankings.items():
             for rank, cid in enumerate(ids, 1):
-                scores[cid] = scores.get(cid, 0.0) + 1.0 / (RRF_K + rank)
+                scores[cid] = scores.get(cid, 0.0) + weights[name] / (RRF_K + rank)
                 ranks.setdefault(cid, {})[name] = rank
-        best = sorted(scores, key=scores.get, reverse=True)[:k]
-        if not best:
+        if not scores:
             return []
 
-        got = self.collection.get(ids=best, include=["documents", "metadatas"])
+        # Metadata for every candidate: the adjustments need titles and sections.
+        got = self.collection.get(ids=list(scores), include=["documents", "metadatas"])
         by_id = {cid: (doc, meta) for cid, doc, meta in zip(got["ids"], got["documents"], got["metadatas"])}
+        scores = {cid: s for cid, s in scores.items() if cid in by_id}  # skip ids missing from the vector store
+        if title_boost:
+            boosted = titles_in_query(query, {by_id[cid][1]["title"] for cid in scores})
+            for cid in scores:
+                if by_id[cid][1]["title"] in boosted:
+                    scores[cid] += title_boost / (RRF_K + 1)
+        if trivia_weight != 1.0:
+            for cid in scores:
+                sections = by_id[cid][1]["sections"].split(" | ")
+                if all(sec.rsplit(" > ", 1)[-1] == "Trivia" for sec in sections):
+                    scores[cid] *= trivia_weight
+
         results = []
-        for cid in best:
-            if cid not in by_id:  # in the keyword index but not (yet) in the vector store
-                continue
+        for cid in sorted(scores, key=scores.get, reverse=True)[:k]:
             doc, meta = by_id[cid]
             results.append({
                 "id": cid,

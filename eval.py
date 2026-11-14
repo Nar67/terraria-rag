@@ -38,7 +38,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from config import HERE, add_logging_args, setup_logging
-from search import Searcher, wants_history
+from search import TUNING, Searcher, wants_history
 
 log = logging.getLogger("rag.eval")
 
@@ -138,6 +138,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-k", type=int, default=8, help="chunks retrieved per question (default 8, as ask.py)")
     ap.add_argument("--mode", choices=["hybrid", "vector", "bm25"], default="hybrid")
+    ap.add_argument("--pool", type=int, help="depth of each ranking before merging (default: search.TUNING)")
+    ap.add_argument("--vector-weight", type=float, help="weight of the vector ranking; BM25 has 1")
+    ap.add_argument("--title-boost", type=float, help="bonus for chunks whose page title is in the question")
+    ap.add_argument("--trivia-weight", type=float, help="score factor for Trivia-only chunks")
     ap.add_argument("--questions", type=Path, default=QUESTIONS)
     ap.add_argument("--only", help="run one category or one question id")
     ap.add_argument("--misses", action="store_true", help="list the retrieved chunks of imperfect questions")
@@ -163,10 +167,13 @@ def main():
             sys.exit(explain(e) or str(e))
         log.info(f"answers from {model} at {LLM_URL}")
 
+    knobs = {name: getattr(args, name) for name in ("pool", "vector_weight", "title_boost", "trivia_weight")}
+    knobs = {name: value for name, value in knobs.items() if value is not None}
+    settings = {**TUNING, **knobs}
     rows = []
     started = time.time()
     for q in questions:
-        results = searcher.search(q["question"], k=args.k, mode=args.mode)
+        results = searcher.search(q["question"], k=args.k, mode=args.mode, **knobs)
         history_on = wants_history(q["question"])
         row = {"id": q["id"], "category": q["category"], "question": q["question"],
                "answerable": q.get("answerable", True), "history_on": history_on,
@@ -206,11 +213,12 @@ def main():
             for i, r in enumerate(row["retrieved"], 1):
                 print(f"    {i}. {r['id']} [{r['kind']}]  {' | '.join(r['sections'])}")
 
-    print(f"\n{len(rows)} questions, mode {args.mode}, k={args.k}, {time.time() - started:.0f} s\n")
+    tuning = ", ".join(f"{name}={value}" for name, value in settings.items())
+    print(f"\n{len(rows)} questions, mode {args.mode}, k={args.k}, {tuning}, {time.time() - started:.0f} s\n")
     print(summarise(rows, args.answers))
     if args.save:
         args.save.parent.mkdir(parents=True, exist_ok=True)
-        args.save.write_text(json.dumps({"mode": args.mode, "k": args.k, "rows": rows},
+        args.save.write_text(json.dumps({"mode": args.mode, "k": args.k, "tuning": settings, "rows": rows},
                                         ensure_ascii=False, indent=1), encoding="utf-8")
         log.info(f"saved results to {args.save}")
 
