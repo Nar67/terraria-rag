@@ -32,6 +32,22 @@ DROP_SELECTORS = [
     ".infobox .section.images",             # sprites
 ]
 
+# Difficulty classes the wiki puts on values and drops that differ by game mode.
+MODE_LABELS = {
+    "m-normal": "Classic",
+    "m-journey": "Journey",
+    "m-expert": "Expert",
+    "m-master": "Master",
+    "m-expert-master": "Expert/Master",
+    "m-normal-expert-master": "Classic/Expert/Master",
+}
+
+# Links to translated subpages ("Consumables/vi"); a block holding one is a
+# stray translation on the English wiki.
+LANGUAGE_SUBPAGE = re.compile(
+    r"/(ar|bg|cs|da|de|el|es|fi|fr|hu|id|it|ja|ko|lt|nl|no|pl|pt|pt-br|ro|ru|sv|th|tr|uk|vi|zh|zh-hans|zh-hant)(\?|#|$)"
+)
+
 # Sections whose whole content is dropped (heading text, lower case).
 DROP_SECTIONS = {"references", "footnotes", "gallery", "see also"}
 
@@ -75,6 +91,76 @@ def images_to_alt(root):
             img.decompose()
 
 
+def tidy_parens(text):
+    """'Hat(when ... )' -> 'Hat (when ...)': spacing lost between adjacent spans."""
+    text = re.sub(r"(\w)\(", r"\1 (", text)
+    text = re.sub(r"\(\s+", "(", text)
+    return re.sub(r"\s+([),.])", r"\1", text)
+
+
+def mode_label(el):
+    """'Classic', 'Expert/Master', ... from an element's m-* classes, or None."""
+    classes = el.get("class") or []
+    if "m-normal" in classes:  # "m-normal m-journey": Journey uses the Classic value
+        return MODE_LABELS["m-normal"]
+    return next((MODE_LABELS[c] for c in classes if c in MODE_LABELS), None)
+
+
+def label_modes(root):
+    """Write per-difficulty values out with their mode.
+
+    The wiki shows one value per game mode as sibling spans (sometimes with a
+    "/" span between them, sometimes with nothing), and its CSS hides all but
+    one. As plain text they would run together ("145000217500277311"), so
+    each becomes "Classic: 145000 / Expert: 217500 / Master: 277311"."""
+    for box in root.select(".mode-content, .npcstat"):
+        parts = []
+        for child in box.find_all(recursive=False):
+            label = mode_label(child)
+            text = tidy_parens(clean(child.get_text(" ")))
+            if label and text:
+                parts.append(f"{label}: {text}")
+        if parts:
+            box.replace_with(" / ".join(parts))
+
+
+def drop_stray_translations(root):
+    for a in root.find_all("a", href=LANGUAGE_SUBPAGE):
+        block = a.find_parent("div")
+        if block is not None:
+            block.decompose()
+
+
+def drop_lines(ul):
+    """An infobox drop list as '- Item (amount): rate (mode only)' lines."""
+    lines = []
+    for li in ul.find_all("li", recursive=False):
+        classes = li.get("class") or []
+        if li.find("strong"):  # the "Item (Quantity) | Rate" header
+            continue
+        if "caption" in classes:  # starts a group, e.g. "Only in Corrupt worlds"
+            text = clean(li.get_text(" "))
+            if text:
+                lines.append(f"{text}:")
+            continue
+        cells = li.find_all("div", recursive=False)
+        if not cells:
+            continue
+        item = tidy_parens(clean(inline_text(cells[0])))
+        if not item:
+            continue
+        rate = clean(inline_text(cells[1])) if len(cells) > 1 else ""
+        mode = mode_label(li)
+        indent = "  " if "group" in classes else ""
+        line = f"{indent}- {item}"
+        if rate:
+            line += f": {rate}"
+        if mode:
+            line += f" ({mode} only)"
+        lines.append(line)
+    return lines
+
+
 def infobox_lines(box):
     lines = []
     title = box.find("div", class_="title", recursive=False)
@@ -106,6 +192,8 @@ def infobox_lines(box):
             row = clean(inline_text(li))
             if row:
                 lines.append(row)
+        for ul in section.select("ul.drops"):
+            lines.extend(drop_lines(ul))
         if label and len(lines) > start:  # no label for a section left empty
             lines.insert(start, label)
     return lines
@@ -191,6 +279,8 @@ def table_lines(table):
     for tr in table.find_all("tr"):
         cells = [clean(inline_text(c)) for c in tr.find_all(["th", "td"], recursive=False)]
         cells = [c for c in cells if c]
+        if cells and cells[0] == "#":  # a numbering column; keep rows from looking like headings
+            cells[0] = "No."
         if cells:
             lines.append(" | ".join(cells))
     return lines
@@ -291,6 +381,8 @@ def extract(html):
             el.decompose()
     for comment in content.find_all(string=lambda s: isinstance(s, Comment)):
         comment.extract()
+    drop_stray_translations(content)
+    label_modes(content)
     images_to_alt(content)
     out = [f"# {title}", ""]
     walk(content, out, {"skip": False})

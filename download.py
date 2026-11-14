@@ -15,7 +15,9 @@ source URL and licence under the title) and adds a line to manifest.jsonl.
 Run it again at any time: pages whose text file is newer than the page's
 last edit are skipped, so an interrupted run resumes and a later run only
 fetches pages that changed. --keep-html also stores the page's HTML,
-gzipped, in html/.
+gzipped, in html/; a page then counts as up to date only once its HTML is
+saved. After changing extract.py, --from-html rebuilds text/ from html/
+without downloading anything.
 
 Content licence: CC BY-NC-SA 4.0 (credit the Terraria Wiki, non-commercial,
 share alike). The site's signals forbid AI training on it (ai-train=no).
@@ -145,6 +147,37 @@ def atomic_write(path, data):
     tmp.replace(path)
 
 
+def page_text(html, url):
+    """extract.py's Markdown with the source URL and licence under the title."""
+    page_title, text = extract(html.decode("utf-8", errors="replace"))
+    header, _, body = text.partition("\n")
+    return page_title, f"{header}\n\nSource: {url}\nLicense: {LICENSE}\n{body}"
+
+
+def rebuild_from_html(out):
+    """Re-extract every saved html/*.html.gz into text/, without the network."""
+    html_dir, text_dir = out / "html", out / "text"
+    files = sorted(html_dir.glob("*.html.gz"))
+    if not files:
+        sys.exit("no saved HTML in html/; download once with --keep-html first")
+    urls = {}  # file name -> source URL, latest manifest entry wins
+    manifest = out / "manifest.jsonl"
+    if manifest.exists():
+        for line in manifest.open(encoding="utf-8"):
+            entry = json.loads(line)
+            urls[file_name(entry["title"])] = entry["url"]
+    text_dir.mkdir(parents=True, exist_ok=True)
+    for i, f in enumerate(files, 1):
+        name = f.name[:-len(".html.gz")]
+        url = urls.get(name) or f"{BASE}/wiki/" + urllib.parse.quote(
+            name.replace("%2F", "/").replace(" ", "_"), safe="/:'(),!")
+        _, text = page_text(gzip.decompress(f.read_bytes()), url)
+        atomic_write(text_dir / (name + ".md"), text.encode("utf-8"))
+        if i % 500 == 0:
+            print(f"{i}/{len(files)} pages", file=sys.stderr)
+    print(f"re-extracted {len(files)} pages into text/", file=sys.stderr)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Download the Terraria Wiki as text.")
     ap.add_argument("--out", type=Path, default=Path(__file__).resolve().parent,
@@ -154,7 +187,13 @@ def main():
     ap.add_argument("--keep-html", action="store_true", help="also save the HTML, gzipped, in html/")
     ap.add_argument("--contact", default="", help="an email or URL added to the User-Agent")
     ap.add_argument("--list", action="store_true", help="print the page list and exit")
+    ap.add_argument("--from-html", action="store_true",
+                    help="re-extract text/ from the saved html/ only; no downloading")
     args = ap.parse_args()
+
+    if args.from_html:
+        rebuild_from_html(args.out)
+        return
 
     delay = max(1.0, args.delay)
     agent = "terraria-rag-learning/0.1 (personal learning project"
@@ -178,7 +217,10 @@ def main():
     todo = []
     for title, url, lastmod in pages:
         path = text_dir / (file_name(title) + ".md")
-        if path.exists() and lastmod and path.stat().st_mtime >= lastmod.timestamp():
+        # With --keep-html a page is only up to date once its HTML is saved too,
+        # so the first such run fetches every page (and resumes if interrupted).
+        check = html_dir / (file_name(title) + ".html.gz") if args.keep_html else path
+        if check.exists() and lastmod and check.stat().st_mtime >= lastmod.timestamp():
             continue
         todo.append((title, url, path))
     up_to_date = len(pages) - len(todo)
@@ -204,11 +246,9 @@ def main():
                 failed += 1
                 continue
             html, final_url = got
-            page_title, text = extract(html.decode("utf-8", errors="replace"))
-            header, _, body = text.partition("\n")
-            text = f"{header}\n\nSource: {url}\nLicense: {LICENSE}\n{body}"
+            page_title, text = page_text(html, url)
             atomic_write(path, text.encode("utf-8"))
-            if args.keep_html:
+            if args.keep_html:  # written last: its time marks the page as done
                 atomic_write(html_dir / (file_name(title) + ".html.gz"), gzip.compress(html))
             manifest.write(json.dumps({
                 "title": title, "page_title": page_title, "url": url, "final_url": final_url,
