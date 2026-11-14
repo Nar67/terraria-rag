@@ -7,5 +7,6 @@ Answer Terraria questions with RAG over the [Terraria Wiki](https://terraria.wik
 - `chunk.py` splits the pages into chunks of at most 512 bge tokens, written to `chunks.jsonl` (`uv run chunk.py`).
 - `index.py` embeds the chunks with bge-small into ChromaDB and builds a BM25 index, in `index/` (`uv run index.py`).
 - `search.py` searches them: vector, BM25 or hybrid (`uv run search.py "how do I summon the Eye of Cthulhu"`).
+- `ask.py` answers questions with the local model from the top chunks, citing wiki pages (`uv run ask.py "how do I summon the Eye of Cthulhu"`).
 
 The code is licensed under [GPL-3.0](LICENSE). Wiki content, including `samples/`, is [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) by the Terraria Wiki contributors. It is used for retrieval only, not for training.
