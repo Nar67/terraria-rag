@@ -20,6 +20,7 @@ Needs the indexes built by index.py.
   question looks like it is about versions or changes, or --history is given.
 """
 import argparse
+import difflib
 import json
 import logging
 import re
@@ -42,7 +43,8 @@ RRF_K = 60  # the usual constant; larger values flatten the gap between ranks
 # Search tuning, chosen with eval.py on eval/questions.jsonl (2026-11-14):
 # hybrid k=8 went from 93% to 100% of questions with all evidence retrieved
 # and MRR 0.69 -> 0.83. Trivia down-weighting made no difference, so it is off.
-TUNING = {"pool": 100, "vector_weight": 2.0, "title_boost": 0.5, "trivia_weight": 1.0}
+TUNING = {"pool": 100, "vector_weight": 2.0, "title_boost": 0.5, "trivia_weight": 1.0,
+          "title_max_share": 0.10, "spell_cutoff": 0.85}
 
 # Questions about versions or changes are the ones History chunks can answer.
 HISTORY_WORDS = re.compile(
@@ -104,6 +106,41 @@ class Searcher:
         self.bm25 = bm25s.BM25.load(str(BM25_DIR))
         self.bm25_ids = meta["ids"]
         self.content_mask = np.array([k == "content" for k in meta["kinds"]], dtype=float)
+        self._share = {}  # title -> share of chunks with its rarest word
+        # Words of page titles, for spelling correction ("zenit" -> "zenith").
+        titles = {cid.rsplit("#", 1)[0] for cid in self.bm25_ids}
+        self.title_words = sorted({w for t in titles for w in normalize(t).split() if len(w) >= 4})
+
+    def correct_spelling(self, query, cutoff):
+        """Replace words the wiki never uses with the closest page-title word.
+
+        Only words unknown to the whole corpus are touched (checked against
+        the BM25 vocabulary, after stemming), so real words like "best" or
+        "armor" never change; "zenit" -> "zenith", "plantra" -> "plantera".
+        Returns the corrected query and the replacements made."""
+        fixes = {}
+        for word in set(re.findall(r"[A-Za-z]{4,}", query)):
+            tokens = bm25_tokenize([word])
+            known = {w for w in tokens.vocab if w in self.bm25.vocab_dict}
+            if not tokens.vocab or known:  # a stopword, or a word the wiki uses
+                continue
+            close = difflib.get_close_matches(word.lower(), self.title_words, n=1, cutoff=cutoff)
+            if close:
+                fixes[word] = close[0]
+        for wrong, right in fixes.items():
+            query = re.sub(rf"\b{re.escape(wrong)}\b", right, query)
+        return query, fixes
+
+    def title_share(self, title):
+        """Share of chunks containing the title's rarest word (BM25 index statistics)."""
+        if title not in self._share:
+            tokens = bm25_tokenize([title])
+            words = {i: w for w, i in tokens.vocab.items()}
+            ids = [self.bm25.vocab_dict[words[i]] for i in tokens.ids[0] if words[i] in self.bm25.vocab_dict]
+            indptr = self.bm25.scores["indptr"]
+            df = min((int(indptr[i + 1] - indptr[i]) for i in ids), default=0)
+            self._share[title] = df / self.bm25.scores["num_docs"]
+        return self._share[title]
 
     def vector_ranking(self, query, n, include_history):
         vec = next(iter(self.model.embed([QUERY_PREFIX + query]))).tolist()
@@ -121,7 +158,8 @@ class Searcher:
         return [self.bm25_ids[d] for d, s in zip(docs[0], scores[0]) if s > 0]
 
     def search(self, query, k=8, mode="hybrid", history=None, pool=None,
-               vector_weight=None, title_boost=None, trivia_weight=None):
+               vector_weight=None, title_boost=None, trivia_weight=None, title_max_share=None,
+               spell_cutoff=None):
         """Top k chunks for a query, best first.
 
         history: True/False to include History chunks or not, None to decide
@@ -131,11 +169,22 @@ class Searcher:
         title_boost    extra score, in "ranked first" units, for chunks of a
                        page whose title is in the question
         trivia_weight  score factor for chunks that are only Trivia
+        title_max_share  no title boost for generic titles: those whose
+                       rarest word is in more than this share of all chunks
+                       ("Hardmode" is in 23%, "Zenith" in 2%)
+        spell_cutoff   similarity (0-1) needed to correct an unknown word to a
+                       page-title word; 0 turns spelling correction off
         """
         pool = TUNING["pool"] if pool is None else pool
         vector_weight = TUNING["vector_weight"] if vector_weight is None else vector_weight
         title_boost = TUNING["title_boost"] if title_boost is None else title_boost
         trivia_weight = TUNING["trivia_weight"] if trivia_weight is None else trivia_weight
+        title_max_share = TUNING["title_max_share"] if title_max_share is None else title_max_share
+        spell_cutoff = TUNING["spell_cutoff"] if spell_cutoff is None else spell_cutoff
+        if spell_cutoff:
+            query, fixes = self.correct_spelling(query, spell_cutoff)
+            if fixes:
+                log.info("spelling: " + ", ".join(f"{a} -> {b}" for a, b in fixes.items()))
         include_history = wants_history(query) if history is None else history
         rankings = {}
         if mode in ("hybrid", "vector"):
@@ -158,6 +207,7 @@ class Searcher:
         scores = {cid: s for cid, s in scores.items() if cid in by_id}  # skip ids missing from the vector store
         if title_boost:
             boosted = titles_in_query(query, {by_id[cid][1]["title"] for cid in scores})
+            boosted = {t for t in boosted if self.title_share(t) <= title_max_share}
             for cid in scores:
                 if by_id[cid][1]["title"] in boosted:
                     scores[cid] += title_boost / (RRF_K + 1)

@@ -10,7 +10,8 @@ Usage:
     uv run eval.py --answers            # also ask the model (see ask.py for RAG_LLM_*)
 
 Retrieval, per answerable question:
-- page hit: a retrieved chunk comes from one of the expected pages
+- page hit: a retrieved chunk comes from one of the expected pages (or,
+  when the question has "targets", from the expected page *and section*)
 - rank: position of the first such chunk (summarised as MRR, mean 1/rank)
 - evidence: share of the question's evidence strings found in the retrieved
   chunks' text (case-insensitive). 1.0 means everything the answer needs
@@ -25,7 +26,9 @@ the questions it fails before trusting the number.
 
 Question format (one JSON object per line):
   {"id", "category", "question", "pages": [...], "evidence": [...],
-   "answer": [...], "history": true?, "answerable": false?}
+   "answer": [...], "history": true?, "answerable": false?,
+   "targets": [{"page": ..., "section": ...}]?}
+"evidence" and "answer" items may hold alternatives: "a|b".
 """
 import argparse
 import json
@@ -61,12 +64,30 @@ def load_questions(path, only):
     return questions
 
 
+def targets(q):
+    """Where a good chunk may come from: [{"page": ..., "section": ...?}].
+
+    "targets" in the question wins; otherwise every page in "pages", any
+    section. A section matches when it is part of the chunk's section path,
+    so "Pre- Wall of Flesh" matches "Guide : Class setups > Pre- Wall of Flesh"."""
+    return q.get("targets") or [{"page": p} for p in q["pages"]]
+
+
+def hits_target(result, q):
+    title = norm_title(result["title"])
+    for t in targets(q):
+        if norm_title(t["page"]) != title:
+            continue
+        if "section" not in t or any(t["section"].lower() in s.lower() for s in result["sections"]):
+            return True
+    return False
+
+
 def score_retrieval(q, results):
-    expected = {norm_title(p) for p in q["pages"]}
-    titles = [norm_title(r["title"]) for r in results]
-    rank = next((i for i, t in enumerate(titles, 1) if t in expected), None)
+    rank = next((i for i, r in enumerate(results, 1) if hits_target(r, q)), None)
     text = "\n".join(r["text"] for r in results).lower()
-    found = [e for e in q["evidence"] if e.lower() in text]
+    # An evidence item "a|b" is found when either alternative is.
+    found = [e for e in q["evidence"] if any(alt.strip().lower() in text for alt in e.split("|"))]
     return {
         "page_hit": rank is not None,
         "rank": rank,
@@ -142,6 +163,8 @@ def main():
     ap.add_argument("--vector-weight", type=float, help="weight of the vector ranking; BM25 has 1")
     ap.add_argument("--title-boost", type=float, help="bonus for chunks whose page title is in the question")
     ap.add_argument("--trivia-weight", type=float, help="score factor for Trivia-only chunks")
+    ap.add_argument("--title-max-share", type=float, help="no title boost for titles in more than this share of chunks")
+    ap.add_argument("--spell-cutoff", type=float, help="similarity needed to correct an unknown word (0 = off)")
     ap.add_argument("--questions", type=Path, default=QUESTIONS)
     ap.add_argument("--only", help="run one category or one question id")
     ap.add_argument("--misses", action="store_true", help="list the retrieved chunks of imperfect questions")
@@ -167,7 +190,7 @@ def main():
             sys.exit(explain(e) or str(e))
         log.info(f"answers from {model} at {LLM_URL}")
 
-    knobs = {name: getattr(args, name) for name in ("pool", "vector_weight", "title_boost", "trivia_weight")}
+    knobs = {name: getattr(args, name) for name in ("pool", "vector_weight", "title_boost", "trivia_weight", "title_max_share", "spell_cutoff")}
     knobs = {name: value for name, value in knobs.items() if value is not None}
     settings = {**TUNING, **knobs}
     rows = []
