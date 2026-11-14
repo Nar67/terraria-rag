@@ -10,4 +10,6 @@ Answer Terraria questions with RAG over the [Terraria Wiki](https://terraria.wik
 - `ask.py` answers questions with the local model from the top chunks, citing wiki pages (`uv run ask.py "how do I summon the Eye of Cthulhu"`).
 - `eval.py` scores retrieval (and, with `--answers`, model answers) on the questions in `eval/questions.jsonl` (`uv run eval.py`).
 
+Tests: `uv run pytest` (unit tests for the extraction, chunking, search, answer and eval logic).
+
 The code is licensed under [GPL-3.0](LICENSE). Wiki content, including `samples/`, is [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) by the Terraria Wiki contributors. It is used for retrieval only, not for training.
