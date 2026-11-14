@@ -18,9 +18,10 @@ The model is any OpenAI-compatible chat server:
 - RAG_LLM_KEY    API key, if the server needs one
 - RAG_LLM_TIMEOUT  seconds to wait for the server (default 300)
 
---think / --no-think switch reasoning on or off on servers whose chat
-template supports it (Qwen3 and similar, via "chat_template_kwargs"). Without
-either flag nothing extra is sent and the server's default applies.
+--think / --no-think switch reasoning on or off (sent both as the Qwen3
+"chat_template_kwargs" flag and, for --no-think, as reasoning_effort "none",
+which is what Ollama honours). Without either flag nothing extra is sent and
+the server's default applies.
 """
 import argparse
 import logging
@@ -133,13 +134,28 @@ class ThinkFilter:
         self.buf = ""
 
 
+def thinking_options(think):
+    """Request fields that switch the model's reasoning on or off.
+
+    Servers disagree on the switch, so both are sent: llama.cpp/vLLM-style
+    servers read the Qwen3 chat-template flag, Ollama only honours
+    reasoning_effort ("none" turns thinking off; its own think=false and the
+    template flag were ignored through /v1 in testing). None sends nothing."""
+    if think is None:
+        return {}
+    options = {"chat_template_kwargs": {"enable_thinking": think}}
+    if not think:
+        options["reasoning_effort"] = "none"
+    return options
+
+
 def stream_answer(client, model, messages, think, temperature):
     """Print the answer as it arrives and return its text.
 
     think: True/False to switch reasoning on/off through the chat template,
     None to send nothing and leave it to the server.
     """
-    extra = {} if think is None else {"chat_template_kwargs": {"enable_thinking": think}}
+    extra = thinking_options(think)
     stream = client.chat.completions.create(
         model=model,
         messages=messages,
