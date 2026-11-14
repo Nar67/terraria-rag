@@ -85,6 +85,15 @@ def images_to_alt(root):
     next to it and the image is dropped."""
     for img in root.find_all("img"):
         alt = (img.get("alt") or "").strip()
+        item = img.find_parent("span", class_="i")
+        if item is not None:
+            # An item link: keep the icon's name only when the item shows no
+            # name of its own (e.g. debuff immunities are icons only).
+            if alt and not item.get_text(strip=True) and "sprite" not in alt.lower():
+                img.replace_with(alt)
+            else:
+                img.decompose()
+            continue
         holder = img.find_parent(["td", "th", "li", "p", "dd"])
         holder_text = holder.get_text(strip=True) if holder else ""
         if alt and holder is not None and not holder_text and "sprite" not in alt.lower():
@@ -124,6 +133,40 @@ def label_modes(root):
                 parts.append(f"{label}: {text}")
         if parts:
             box.replace_with(" / ".join(parts))
+
+
+def separate_items(root):
+    """Separate item links (span.i: icon + name) from what follows them.
+
+    Lists like the class setups show each item as its own block via CSS, with
+    nothing between them in the HTML, so as plain text they ran together:
+    "Star CannonPhoenix BlasterQuad-Barrel Shotgun". Now:
+    - item, item          -> "Star Cannon, Phoenix Blaster"
+    - block item, text    -> "Starfury: For melee users, ..."
+    - item, "(note)"      -> "Blood Rain Bow (Shimmer Arrows)", also when
+                             the note is inside the item (span.note)
+    """
+    for note in root.select("span.i span.note"):
+        note.insert_before(" ")
+    for span in root.select("span.i"):
+        nxt = span.next_sibling
+        while isinstance(nxt, NavigableString) and not nxt.strip():
+            nxt = nxt.next_sibling
+        if isinstance(nxt, Tag) and "i" in (nxt.get("class") or []):
+            # Replace any whitespace between them, so the result reads "A, B".
+            between = span.next_sibling
+            while between is not nxt:
+                following = between.next_sibling
+                between.extract()
+                between = following
+            span.insert_after(", ")
+        elif isinstance(nxt, NavigableString):
+            adjacent = nxt is span.next_sibling  # no whitespace in between
+            if nxt.strip().startswith("("):
+                if adjacent:
+                    span.insert_after(" ")
+            elif "break" in (span.get("class") or []):  # a block: what follows is a description
+                span.insert_after(": ")
 
 
 def drop_stray_translations(root):
@@ -309,7 +352,7 @@ def walk(container, out, state):
     for el in container.children:
         if isinstance(el, NavigableString):
             text = clean(str(el))
-            if text and not state["skip"]:
+            if text and text not in (",", ":") and not state["skip"]:  # a lone separator from separate_items
                 out.append(text)
             continue
         if not isinstance(el, Tag):
@@ -384,6 +427,7 @@ def extract(html):
     for comment in content.find_all(string=lambda s: isinstance(s, Comment)):
         comment.extract()
     drop_stray_translations(content)
+    separate_items(content)
     label_modes(content)
     images_to_alt(content)
     out = [f"# {title}", ""]
