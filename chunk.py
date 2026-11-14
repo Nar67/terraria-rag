@@ -26,6 +26,7 @@ How a page is split:
   the question is about versions or changes.
 """
 import argparse
+import hashlib
 import json
 import re
 import statistics
@@ -35,14 +36,13 @@ from pathlib import Path
 
 from tokenizers import Tokenizer
 
-MODEL = "BAAI/bge-small-en-v1.5"
-HERE = Path(__file__).resolve().parent
+from config import CHUNKS, EMBED_MAX_TOKENS, EMBED_MODEL, HERE, TEXT_DIR
 
 HEADING = re.compile(r"^(#{2,6})\s+(.*\S)\s*$")
 SENTENCE_END = re.compile(r"(?<=[.!?…])\s+")
 BLANK_LINES = re.compile(r"\n\s*\n")
 
-_tok = Tokenizer.from_pretrained(MODEL)
+_tok = Tokenizer.from_pretrained(EMBED_MODEL)
 _tok.no_truncation()
 _tok.no_padding()
 
@@ -230,6 +230,21 @@ def pull_sections(node, name):
     return pulled
 
 
+def chunk_id(title, text, used):
+    """'Zenith#3f2a9c1b0d4e': page title plus a hash of the chunk's text.
+
+    Ids follow the content, not the position, so an edit near the top of a
+    page changes the ids of the edited chunks only and index.py re-embeds
+    just those. `used` makes identical chunks on one page still unique."""
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
+    n = 12
+    while f"{title}#{digest[:n]}" in used:
+        n += 1
+    cid = f"{title}#{digest[:n]}"
+    used.add(cid)
+    return cid
+
+
 def chunk_page(path, limit, minimum):
     root, url = parse(path.read_text(encoding="utf-8"), path.stem)
     history = pull_sections(root, "History")
@@ -237,14 +252,15 @@ def chunk_page(path, limit, minimum):
     history_chunks = merge_small([c for h in history for c in chunk_node(h, limit)], limit, minimum)
     tagged = [("content", c) for c in content_chunks] + [("history", c) for c in history_chunks]
     title = root.path[0]
-    records = []
+    records, used = [], set()
     for i, (kind, chunk) in enumerate(tagged):
         tokens = ntok(chunk.text)
         if tokens > limit:  # cannot happen if the splitting above is right
             raise AssertionError(f"{path.name} chunk {i} has {tokens} tokens")
         records.append({
-            "id": f"{title}#{i}",
+            "id": chunk_id(title, chunk.text, used),
             "title": title,
+            "position": i,
             "kind": kind,
             "sections": chunk.sections,
             "url": url,
@@ -258,13 +274,16 @@ def chunk_page(path, limit, minimum):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("files", nargs="*", type=Path, help="pages to chunk (default: text/*.md)")
-    ap.add_argument("-o", "--output", type=Path, default=HERE / "chunks.jsonl")
-    ap.add_argument("--max-tokens", type=int, default=512, help="hard limit per chunk (default 512)")
+    ap.add_argument("-o", "--output", type=Path, default=CHUNKS)
+    ap.add_argument("--max-tokens", type=int, default=EMBED_MAX_TOKENS,
+                    help=f"hard limit per chunk (default and maximum {EMBED_MAX_TOKENS}, the model's limit)")
     ap.add_argument("--min-tokens", type=int, default=100, help="merge chunks smaller than this (default 100)")
     ap.add_argument("--show", action="store_true", help="print the chunks instead of writing them")
     args = ap.parse_args()
 
-    files = args.files or sorted((HERE / "text").glob("*.md"))
+    if args.max_tokens > EMBED_MAX_TOKENS:
+        sys.exit(f"--max-tokens above {EMBED_MAX_TOKENS} would let {EMBED_MODEL} truncate chunks")
+    files = args.files or sorted(TEXT_DIR.glob("*.md"))
     if not files:
         sys.exit("no pages found; run download.py first")
 

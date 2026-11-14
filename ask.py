@@ -16,6 +16,7 @@ The model is any OpenAI-compatible chat server:
 - RAG_LLM_URL    server address (default http://localhost:8000/v1)
 - RAG_LLM_MODEL  model name (default: the first model the server lists)
 - RAG_LLM_KEY    API key, if the server needs one
+- RAG_LLM_TIMEOUT  seconds to wait for the server (default 300)
 
 --think / --no-think switch reasoning on or off on servers whose chat
 template supports it (Qwen3 and similar, via "chat_template_kwargs"). Without
@@ -26,12 +27,32 @@ import os
 import re
 import sys
 
+import openai
 from openai import OpenAI
 
 from search import Searcher, wants_history
 
 LLM_URL = os.environ.get("RAG_LLM_URL", "http://localhost:8000/v1")
 LLM_MODEL = os.environ.get("RAG_LLM_MODEL")  # None: ask the server
+LLM_TIMEOUT = float(os.environ.get("RAG_LLM_TIMEOUT", "300"))  # seconds; local models can be slow
+
+
+def explain(error):
+    """A one-line message for errors from the model server."""
+    if isinstance(error, openai.APITimeoutError):
+        return f"the model at {LLM_URL} did not answer within {LLM_TIMEOUT:.0f} s (RAG_LLM_TIMEOUT)"
+    if isinstance(error, openai.APIConnectionError):
+        return f"cannot reach the model at {LLM_URL}; is the server running?"
+    if isinstance(error, openai.NotFoundError):
+        return f"the server has no model {LLM_MODEL!r}; check RAG_LLM_MODEL" if LLM_MODEL else \
+            f"not found at {LLM_URL}; is it an OpenAI-compatible /v1 address?"
+    if isinstance(error, openai.AuthenticationError):
+        return "the server rejected the API key; set RAG_LLM_KEY"
+    if isinstance(error, openai.BadRequestError):  # e.g. the prompt is longer than the model's context
+        return f"the server rejected the request: {error.message} (try a smaller -k)"
+    if isinstance(error, openai.APIStatusError):
+        return f"the model server returned an error {error.status_code}: {error.message}"
+    return None
 
 
 def pick_model(client):
@@ -201,24 +222,29 @@ def main():
     args = ap.parse_args()
 
     searcher = Searcher()
-    client = OpenAI(base_url=LLM_URL, api_key=os.environ.get("RAG_LLM_KEY", "none"))
+    client = OpenAI(base_url=LLM_URL, api_key=os.environ.get("RAG_LLM_KEY", "none"),
+                    timeout=LLM_TIMEOUT, max_retries=1)
 
     model = None
 
     def run(question):
+        """Answer one question; return an error message instead of raising."""
         nonlocal model
         try:
             if model is None and not args.dry_run:
                 model = pick_model(client)
             ask(question, searcher, client, model, args)
-        except Exception as e:  # e.g. the model server is not running
-            name = type(e).__name__
-            if "Connection" in name:
-                sys.exit(f"cannot reach the model at {LLM_URL}; is the server running?")
-            raise
+        except openai.OpenAIError as e:
+            message = explain(e)
+            if message is None:
+                raise
+            return message
+        return None
 
     if args.question:
-        run(" ".join(args.question))
+        error = run(" ".join(args.question))
+        if error:
+            sys.exit(error)
         return
     print("Ask about Terraria (empty line or Ctrl-D to quit).")
     while True:
@@ -229,7 +255,13 @@ def main():
             break
         if not question:
             break
-        run(question)
+        try:
+            error = run(question)
+        except KeyboardInterrupt:  # Ctrl-C stops this answer, not the session
+            print("\n(stopped)")
+            continue
+        if error:
+            print(f"error: {error}")
 
 
 if __name__ == "__main__":

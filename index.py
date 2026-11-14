@@ -18,15 +18,16 @@ rebuilt in full each time; that takes seconds.
 """
 import hashlib
 import json
+import shutil
 import sys
 import time
 
 import bm25s
 from fastembed import TextEmbedding
 
-from search import BM25_DIR, HERE, MODEL, bm25_tokenize, open_collection
+from config import BM25_DIR, BM25_META, CHUNKS, EMBED_MODEL
+from search import bm25_tokenize, open_collection
 
-CHUNKS = HERE / "chunks.jsonl"
 BATCH = 256  # chunks embedded and stored per step
 
 
@@ -47,8 +48,10 @@ def metadata(r):
     }
 
 
-def build_vectors(records):
+def build_vectors(records, build):
     collection = open_collection(create=True)
+    # A fresh build stamp only once every vector below is stored.
+    collection.modify(metadata={"model": EMBED_MODEL, "build": "incomplete"})
     stored = collection.get(include=["metadatas"])
     stored_hash = {cid: m.get("hash") for cid, m in zip(stored["ids"], stored["metadatas"])}
 
@@ -60,12 +63,15 @@ def build_vectors(records):
     todo = [r for r in records if stored_hash.get(r["id"]) != text_hash(r["text"])]
     print(f"vectors: {len(records) - len(todo)} chunks up to date, {len(todo)} to embed, "
           f"{len(stale)} removed", file=sys.stderr)
-    if not todo:
-        return
+    if todo:
+        embed(collection, todo)
+    collection.modify(metadata={"model": EMBED_MODEL, "build": build})
 
+
+def embed(collection, todo):
     # Similar lengths in a batch mean less padding, so sort by length.
     todo.sort(key=lambda r: r["tokens"])
-    model = TextEmbedding(MODEL)
+    model = TextEmbedding(EMBED_MODEL)
     start = time.time()
     for i in range(0, len(todo), BATCH):
         batch = todo[i:i + BATCH]
@@ -82,27 +88,39 @@ def build_vectors(records):
               file=sys.stderr)
 
 
-def build_bm25(records):
+def build_bm25(records, build):
     retriever = bm25s.BM25()
     retriever.index(bm25_tokenize([r["text"] for r in records]), show_progress=False)
-    retriever.save(str(BM25_DIR))
-    (BM25_DIR / "chunk_ids.json").write_text(json.dumps({
+    # Save to a temporary folder and swap it in, so an interruption never
+    # leaves a half-written index behind.
+    tmp = BM25_DIR.with_name(BM25_DIR.name + ".tmp")
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    retriever.save(str(tmp))
+    (tmp / BM25_META.name).write_text(json.dumps({
+        "build": build,
         "ids": [r["id"] for r in records],
         "kinds": [r["kind"] for r in records],
     }))
+    if BM25_DIR.exists():
+        shutil.rmtree(BM25_DIR)
+    tmp.rename(BM25_DIR)
     print(f"bm25: indexed {len(records)} chunks", file=sys.stderr)
 
 
 def main():
     if not CHUNKS.exists():
         sys.exit("chunks.jsonl not found; run: uv run chunk.py")
-    records = [json.loads(line) for line in CHUNKS.open(encoding="utf-8")]
+    data = CHUNKS.read_bytes()
+    records = [json.loads(line) for line in data.decode("utf-8").splitlines()]
     ids = [r["id"] for r in records]
     if len(set(ids)) != len(ids):
         sys.exit("chunks.jsonl has duplicate ids")
-    build_bm25(records)
-    build_vectors(records)
-    print("done", file=sys.stderr)
+    # Both indexes get this stamp; search.py warns when they differ.
+    build = hashlib.sha1(EMBED_MODEL.encode() + b"\0" + data).hexdigest()[:16]
+    build_vectors(records, build)  # slow and resumable, so first
+    build_bm25(records, build)
+    print(f"done (build {build})", file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -23,7 +23,6 @@ import argparse
 import json
 import re
 import sys
-from pathlib import Path
 
 import bm25s
 import chromadb
@@ -32,15 +31,8 @@ import Stemmer
 from chromadb.config import Settings
 from fastembed import TextEmbedding
 
-HERE = Path(__file__).resolve().parent
-INDEX_DIR = HERE / "index"
-CHROMA_DIR = INDEX_DIR / "chroma"
-BM25_DIR = INDEX_DIR / "bm25"
-COLLECTION = "chunks"
-MODEL = "BAAI/bge-small-en-v1.5"
-# bge-*-en-v1.5 is trained with this prefix on queries only; fastembed's
-# query_embed does not add it, so it is added here.
-QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+from config import BM25_DIR, BM25_META, CHROMA_DIR, COLLECTION, EMBED_MODEL, QUERY_PREFIX
+
 RRF_K = 60  # the usual constant; larger values flatten the gap between ranks
 
 # Questions about versions or changes are the ones History chunks can answer.
@@ -70,12 +62,21 @@ def open_collection(create=False):
 
 class Searcher:
     def __init__(self):
-        if not (CHROMA_DIR.exists() and BM25_DIR.exists()):
+        if not (CHROMA_DIR.exists() and BM25_META.exists()):
             sys.exit("no index found; run: uv run index.py")
-        self.model = TextEmbedding(MODEL)
         self.collection = open_collection()
+        meta = json.loads(BM25_META.read_text())
+        vec_meta = self.collection.metadata or {}
+        # Vectors from another model live in a different space: searching them
+        # with this model's query vectors would return nonsense, so refuse.
+        built_with = vec_meta.get("model")
+        if built_with and built_with != EMBED_MODEL:
+            sys.exit(f"the index was built with {built_with}, config says {EMBED_MODEL}; run: uv run index.py")
+        if not vec_meta.get("build") or vec_meta.get("build") != meta.get("build"):
+            print("warning: the vector and keyword indexes come from different builds "
+                  "(index.py was interrupted?); results may miss chunks. Run: uv run index.py", file=sys.stderr)
+        self.model = TextEmbedding(EMBED_MODEL)
         self.bm25 = bm25s.BM25.load(str(BM25_DIR))
-        meta = json.loads((BM25_DIR / "chunk_ids.json").read_text())
         self.bm25_ids = meta["ids"]
         self.content_mask = np.array([k == "content" for k in meta["kinds"]], dtype=float)
 
@@ -90,6 +91,7 @@ class Searcher:
         if not tokens.vocab:  # nothing but stopwords
             return []
         mask = None if include_history else self.content_mask
+        n = min(n, len(self.bm25_ids))  # bm25s refuses a k larger than the corpus
         docs, scores = self.bm25.retrieve(tokens, k=n, show_progress=False, weight_mask=mask)
         return [self.bm25_ids[d] for d, s in zip(docs[0], scores[0]) if s > 0]
 
@@ -119,6 +121,8 @@ class Searcher:
         by_id = {cid: (doc, meta) for cid, doc, meta in zip(got["ids"], got["documents"], got["metadatas"])}
         results = []
         for cid in best:
+            if cid not in by_id:  # in the keyword index but not (yet) in the vector store
+                continue
             doc, meta = by_id[cid]
             results.append({
                 "id": cid,
