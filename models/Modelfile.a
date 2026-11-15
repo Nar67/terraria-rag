@@ -1,0 +1,7 @@
+# A: what eval/ask used so far: Ollama's Qwen3.5 defaults (thinking-mode preset)
+# with temperature lowered to 0.2.
+FROM qwen3.5:9b
+PARAMETER temperature 0.2
+PARAMETER top_p 0.95
+PARAMETER top_k 20
+PARAMETER presence_penalty 1.5
