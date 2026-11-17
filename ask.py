@@ -13,8 +13,9 @@ prompt numbered [1], [2], ..., and the model answers from them only, citing
 the numbers. The cited wiki pages are listed under the answer.
 
 The model is any OpenAI-compatible chat server:
-- RAG_LLM_URL    server address (default http://localhost:8000/v1)
-- RAG_LLM_MODEL  model name (default: the first model the server lists)
+- RAG_LLM_URL    server address (default http://localhost:11434/v1, Ollama)
+- RAG_LLM_MODEL  model name (default qwen3.5-9b-rag, see models/Modelfile;
+                 set it empty to use the first model the server lists)
 - RAG_LLM_KEY    API key, if the server needs one
 - RAG_LLM_TIMEOUT  seconds to wait for the server (default 300)
 
@@ -37,8 +38,8 @@ from search import Searcher, wants_history
 
 log = logging.getLogger("rag.ask")
 
-LLM_URL = os.environ.get("RAG_LLM_URL", "http://localhost:8000/v1")
-LLM_MODEL = os.environ.get("RAG_LLM_MODEL")  # None: ask the server
+LLM_URL = os.environ.get("RAG_LLM_URL", "http://localhost:11434/v1")
+LLM_MODEL = os.environ.get("RAG_LLM_MODEL", "qwen3.5-9b-rag")  # "": ask the server
 LLM_TIMEOUT = float(os.environ.get("RAG_LLM_TIMEOUT", "300"))  # seconds; local models can be slow
 
 
@@ -76,6 +77,7 @@ Rules:
 - Cite the sources you used with their numbers in square brackets, like [2] or [1][4], right after the fact they support.
 - Sources marked "history" are changelogs of past game versions. Use them only for questions about versions or changes, and never present an old value as the current one.
 - Values often differ by difficulty (Classic / Expert / Master) or platform; say so when it matters.
+- State the requirements the sources give: whether something is Hardmode-only, needs a boss to be defeated first, or depends on the biome, layer, time of day or an event.
 - Be direct and short. Use a list for recipes, steps and drops."""
 
 DIM, RESET = "\033[2m", "\033[0m"
@@ -159,7 +161,7 @@ def stream_answer(client, model, messages, think, temperature):
     stream = client.chat.completions.create(
         model=model,
         messages=messages,
-        temperature=temperature,
+        **({} if temperature is None else {"temperature": temperature}),
         stream=True,
         extra_body=extra or None,
     )
@@ -236,7 +238,8 @@ def main():
                        help="ask the model to reason before answering (slower)")
     think.add_argument("--no-think", dest="think", action="store_false",
                        help="ask the model not to reason")
-    ap.add_argument("--temperature", type=float, default=0.2)
+    ap.add_argument("--temperature", type=float, default=None,
+                    help="sampling temperature (default: the model's own setting)")
     ap.add_argument("--show-sources", action="store_true", help="list the retrieved chunks before the answer")
     ap.add_argument("--dry-run", action="store_true", help="print the prompt and stop; no model needed")
     add_logging_args(ap)

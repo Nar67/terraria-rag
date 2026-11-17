@@ -1,0 +1,10 @@
+# qwen3.5-9b-rag: the default answering model (ask.py, eval.py).
+# Settings of sampling variant C (DEVLOG §18): greedy decoding and no presence
+# penalty. Variants A-D scored the same within noise; temperature 0 was chosen
+# because it is deterministic, so one eval run measures a change.
+# Create or update with:  ollama create qwen3.5-9b-rag -f models/Modelfile
+FROM qwen3.5:9b
+PARAMETER temperature 0
+PARAMETER top_p 0.95
+PARAMETER top_k 20
+PARAMETER presence_penalty 0

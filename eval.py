@@ -100,7 +100,7 @@ def fact_found(fact, answer):
     return any(alt.strip().lower() in answer.lower() for alt in fact.split("|"))
 
 
-def ask_model(question, results, client, model, think=None, temperature=0.2):
+def ask_model(question, results, client, model, think=None, temperature=None):
     """The model's answer, non-streaming, with any <think> block removed."""
     from ask import build_messages, thinking_options  # only needed with --answers
 
@@ -172,9 +172,9 @@ def main():
     ap.add_argument("--only", help="run one category or one question id")
     ap.add_argument("--misses", action="store_true", help="list the retrieved chunks of imperfect questions")
     ap.add_argument("--answers", action="store_true", help="also ask the model and check the answers")
-    ap.add_argument("--temperature", default="0.2",
-                    help='with --answers: sampling temperature (default 0.2); "model" sends none, so the '
-                         "model's own setting (e.g. from an Ollama Modelfile variant) applies")
+    ap.add_argument("--temperature", default="model",
+                    help='with --answers: sampling temperature; "model" (default) sends none, so the '
+                         "model's own setting (e.g. from an Ollama Modelfile) applies")
     think = ap.add_mutually_exclusive_group()
     think.add_argument("--think", dest="think", action="store_true", default=None, help="with --answers: model reasons first")
     think.add_argument("--no-think", dest="think", action="store_false", help="with --answers: no reasoning (faster)")
