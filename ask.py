@@ -151,6 +151,20 @@ def thinking_options(think):
     return options
 
 
+# Output caps. Without them a model stuck in a loop generates until the context
+# is full: thinking + forced JSON once ran 19-29k tokens (5-7 min of full GPU
+# load) and froze the whole PC (DEVLOG §20). Normal answers are 150-300 tokens;
+# with reasoning first they were 2,200-2,600.
+MAX_ANSWER_TOKENS = 1024
+MAX_THINKING_TOKENS = 4096  # reasoning counts toward the cap
+
+
+def max_answer_tokens(think):
+    """The output cap: tight without reasoning, roomier when the model may reason
+    (think=True, or None = server default, which reasons for Qwen3.5)."""
+    return MAX_ANSWER_TOKENS if think is False else MAX_THINKING_TOKENS
+
+
 def stream_answer(client, model, messages, think, temperature):
     """Print the answer as it arrives and return its text.
 
@@ -163,9 +177,10 @@ def stream_answer(client, model, messages, think, temperature):
         messages=messages,
         **({} if temperature is None else {"temperature": temperature}),
         stream=True,
+        max_tokens=max_answer_tokens(think),
         extra_body=extra or None,
     )
-    answer = []
+    answer, cut_off = [], False
 
     def show_reasoning(text):
         if text:
@@ -182,10 +197,13 @@ def stream_answer(client, model, messages, think, temperature):
     for event in stream:
         if not event.choices:
             continue
+        cut_off = cut_off or event.choices[0].finish_reason == "length"
         delta = event.choices[0].delta
         show_reasoning(getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None))
         tags.feed(delta.content or "")
     tags.flush()
+    if cut_off:
+        print(f"\n{DIM}(cut off at the {max_answer_tokens(think)}-token limit){RESET}", end="")
     print()
     return "".join(answer).strip()
 

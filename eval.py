@@ -102,13 +102,15 @@ def fact_found(fact, answer):
 
 def ask_model(question, results, client, model, think=None, temperature=None):
     """The model's answer, non-streaming, with any <think> block removed."""
-    from ask import build_messages, thinking_options  # only needed with --answers
+    from ask import build_messages, max_answer_tokens, thinking_options  # only needed with --answers
 
     extra = thinking_options(think)
     sampling = {} if temperature is None else {"temperature": temperature}  # None: the model's own setting
     reply = client.chat.completions.create(
         model=model, messages=build_messages(question, results), stream=False,
-        extra_body=extra or None, **sampling)
+        max_tokens=max_answer_tokens(think), extra_body=extra or None, **sampling)
+    if reply.choices[0].finish_reason == "length":
+        log.warning(f"answer cut off at {max_answer_tokens(think)} tokens: {question[:60]}")
     text = reply.choices[0].message.content or ""
     return re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
 

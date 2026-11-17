@@ -1,6 +1,6 @@
 import pytest
 
-from ask import ThinkFilter, cited_numbers, thinking_options
+from ask import MAX_ANSWER_TOKENS, MAX_THINKING_TOKENS, ThinkFilter, cited_numbers, max_answer_tokens, thinking_options
 
 STREAM = "<think>plan: cite [2]</think>Answer [2] uses a < sign and <b>tag</b>."
 
@@ -35,3 +35,13 @@ def test_cited_numbers(answer, count, cited):
 ])
 def test_thinking_options(think, options):
     assert thinking_options(think) == options
+
+
+@pytest.mark.parametrize("think, cap", [
+    (False, MAX_ANSWER_TOKENS),
+    (True, MAX_THINKING_TOKENS),
+    (None, MAX_THINKING_TOKENS),  # server default: Qwen3.5 reasons, so leave room for it
+])
+def test_every_answer_is_capped(think, cap):
+    """A request without a cap once generated 29k tokens and froze the PC."""
+    assert max_answer_tokens(think) == cap <= 4096
