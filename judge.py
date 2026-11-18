@@ -183,7 +183,12 @@ def calibrate(rows, run_name):
     if not pairs:
         sys.exit(f"no hand labels for run {run_name!r} in {LABELS}")
     print(f"\ncalibration on {len(pairs)} hand-labelled answers:")
-    for key, judged in (("faithful", lambda v: v["faithful"]), ("correct", lambda v: v["answers_question"])):
+    # For out-of-scope questions "answers the question" means refusing.
+    answerable = {json.loads(l)["id"]: json.loads(l).get("answerable", True)
+                  for l in (HERE / "eval" / "questions.jsonl").open(encoding="utf-8")}
+    verdict_of = {id(v): (v["answers_question"] if answerable.get(l["id"], True) else ("yes" if v["refuses"] else "no"))
+                  for l, v in pairs}
+    for key, judged in (("faithful", lambda v: v["faithful"]), ("correct", lambda v: verdict_of[id(v)])):
         agree = [l[key] == judged(v) for l, v in pairs]
         print(f"  {key:<9} judge agrees with the label on {sum(agree)}/{len(agree)} ({statistics.mean(agree):.0%})")
         for (l, v), ok in zip(pairs, agree):
