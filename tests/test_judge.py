@@ -1,6 +1,6 @@
 import pytest
 
-from judge import quote_in
+from judge import quote_in, score
 
 SOURCES = [{"text": "\n".join([
     "Guide : Crafting a Shellphone > Goblin Tech",
@@ -26,3 +26,39 @@ SOURCES = [{"text": "\n".join([
 ])
 def test_quote_in(quote, found):
     assert quote_in(quote, SOURCES) is found
+
+
+def claim(verdict, differences="none", quote="Kill a Voodoo Demon to get a Guide Voodoo Doll."):
+    return {"claim": "...", "quote": quote, "differences": differences, "verdict": verdict}
+
+
+@pytest.mark.parametrize("c, supported", [
+    (claim("supported"), True),
+    # "differences" is only the judge's reasoning; the verdict decides
+    (claim("supported", "doesn't say 'permanent'"), True),
+    (claim("contradicted", "Jungle Temple, not Underworld"), False),
+    (claim("not in excerpts", quote=""), False),
+    # a quote that isn't in the excerpts can't support anything
+    (claim("supported", quote="Kill a Voodoo Demon in the Jungle Temple"), False),
+])
+def test_score_claims(c, supported):
+    verdict = score({"claims": [c], "coverage": "", "answers_question": "yes", "refuses": False}, SOURCES)
+    assert verdict["claims"][0]["supported"] is supported
+    assert verdict["faithful"] is supported
+
+
+@pytest.mark.parametrize("answers, refuses, claims, answerable, rating", [
+    ("yes", False, [], True, "yes"),
+    ("partially", False, [], True, "partially"),
+    # a "yes" that gets a detail wrong is only partly right
+    ("yes", False, [claim("contradicted", "Jungle Temple, not Underworld")], True, "partially"),
+    # out of scope: a refusal is right, whichever way the judge flags it
+    ("no", True, [], False, "yes"),
+    ("yes", False, [], False, "yes"),
+    ("no", False, [], False, "no"),
+])
+def test_score_rating(answers, refuses, claims, answerable, rating):
+    verdict = {"claims": claims, "coverage": "", "answers_question": answers, "refuses": refuses}
+    scored = score(verdict, SOURCES, answerable)
+    assert scored["rating"] == rating
+    assert scored["correct"] is (rating == "yes")

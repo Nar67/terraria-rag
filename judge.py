@@ -11,8 +11,10 @@ eval.py's fact check only tests whether expected words appear in the answer;
 it can't see a wrong claim ("kill a Voodoo Demon in the Jungle Temple") or a
 right answer worded differently. The judge reads the same numbered sources the
 answering model saw and returns a structured verdict:
-- claims: every factual claim in the answer, each supported by the sources or
-  not -> faithful = all supported (catches made-up or misread facts)
+- claims: every factual claim in the answer with the closest quote from the
+  sources, the differences between the two, and a verdict (supported /
+  contradicted / not in excerpts) -> faithful = all supported (catches
+  made-up or misread facts)
 - answers_question: yes / partially / no, with the question's expected facts as
   a reference -> correct = "yes" (for out-of-scope questions: a refusal)
 
@@ -41,30 +43,45 @@ from search import open_collection
 log = logging.getLogger("rag.judge")
 
 LABELS = HERE / "eval" / "judge-labels.jsonl"
-MAX_VERDICT_TOKENS = 2048  # a verdict with ~20 claims is ~1,000 tokens
+MAX_VERDICT_TOKENS = 3072  # ~20 claims with their quotes and differences
 
+# Prompt design (DEVLOG §23, after the Hugging Face "LLM as a judge" cookbook):
+# the judge writes its evidence and reasoning *before* each decision (quote,
+# then differences, then verdict; coverage, then answers_question), every
+# verdict level is described, and the expected facts serve as the reference.
 JUDGE_PROMPT = """You check answers written by an assistant that answers questions about the game Terraria from numbered wiki excerpts.
 
-You get the question, the excerpts the assistant was given, a list of facts a complete answer should cover, and the assistant's answer.
+You get the question, the excerpts the assistant was given, a list of facts a complete answer should cover, and the assistant's answer. Judge only against the excerpts, not your own knowledge of the game. Ignore the answer's citation numbers, wording and formatting.
 
-1. List every factual claim the answer makes about the game (items, places, conditions, numbers, steps). For each claim, copy the sentence from the excerpts that supports it, word for word, as "quote". The quote must back every detail of the claim, including places, numbers and conditions: if the excerpts say "kill a Voodoo Demon in the Underworld" and the claim says "in the Jungle Temple", the claim is not supported, even if the Jungle Temple is mentioned somewhere else. Pieces from different sentences about different things don't add up to support. If no single passage supports the whole claim, leave "quote" empty and mark it not supported. Ignore the answer's citation numbers, wording and formatting.
-2. Decide whether the answer answers the question: "yes" if it covers what was asked (the expected facts are a guide, not a checklist of exact words), "partially" if it misses an important part, "no" if it doesn't answer or is mostly wrong.
-3. Note whether the answer says the excerpts don't cover the question.
+1. "claims": list every factual claim the answer makes about the game (items, names, places, numbers, conditions, steps), one fact per claim. For each claim, fill in, in this order:
+   - "quote": the passage from the excerpts that comes closest to supporting the claim, copied word for word. Empty if nothing does.
+   - "differences": compare the claim with the quote detail by detail: names, places, numbers, conditions, yes or no, and which way a rule goes. List every detail of the claim that the quote does not state or states differently. Write "none" only if the quote states every detail.
+   - "verdict":
+     - "supported": the quote states the whole claim; differences is "none".
+     - "contradicted": the quote says something different: another name, place or number, or the opposite rule.
+     - "not in excerpts": the excerpts don't state it. This includes guesses, conclusions the excerpts don't draw, and facts that may be true in the game but are not in the excerpts.
+   Example: the excerpts say "kill a Voodoo Demon in the Underworld" and the claim says "kill a Voodoo Demon in the Jungle Temple": differences "Underworld, not Jungle Temple", verdict "contradicted", even if the Jungle Temple is mentioned somewhere else. Pieces from different sentences about different things don't add up to support.
+2. "coverage": one or two sentences comparing the answer with the question and the expected facts: what it covers, what it misses, and whether a claim that matters for the question is wrong.
+3. "answers_question":
+   - "yes": answers what was asked and covers the expected facts (in any wording) or equivalent information.
+   - "partially": answers only part of it, misses something the asker needs (such as a requirement or a step), or gets a detail that matters wrong.
+   - "no": doesn't answer what was asked, or its main point is wrong.
+4. "refuses": true if the answer says the excerpts or the wiki don't cover the question."""
 
-Judge only against the excerpts, not your own knowledge of the game."""
-
+VERDICTS = ["supported", "contradicted", "not in excerpts"]
 VERDICT_SCHEMA = {
     "type": "object",
-    "properties": {
+    "properties": {  # in the order the model writes them: evidence before decisions
         "claims": {"type": "array", "items": {
             "type": "object",
-            "properties": {"claim": {"type": "string"}, "quote": {"type": "string"}, "supported": {"type": "boolean"}},
-            "required": ["claim", "quote", "supported"]}},
+            "properties": {"claim": {"type": "string"}, "quote": {"type": "string"},
+                           "differences": {"type": "string"}, "verdict": {"type": "string", "enum": VERDICTS}},
+            "required": ["claim", "quote", "differences", "verdict"]}},
+        "coverage": {"type": "string"},
         "answers_question": {"type": "string", "enum": ["yes", "partially", "no"]},
         "refuses": {"type": "boolean"},
-        "reason": {"type": "string"},
     },
-    "required": ["claims", "answers_question", "refuses", "reason"],
+    "required": ["claims", "coverage", "answers_question", "refuses"],
 }
 
 
@@ -139,21 +156,51 @@ def judge_one(client, model, question, row, sources, think):
         verdict = json.loads(text[text.index("{"):text.rindex("}") + 1])
     except ValueError:
         return {"error": "no valid JSON verdict"}
-    # A claim counts as supported only if the judge says so AND its quote really is
-    # in the excerpts: pointing at the evidence keeps the judge honest, and a
-    # made-up or empty quote is caught here, not trusted.
+    return score(verdict, sources, question.get("answerable", True))
+
+
+def score(verdict, sources, answerable=True):
+    """Add faithful / support / rating / correct to the judge's raw verdict.
+
+    A claim counts as supported only if the judge says so AND its quote really
+    is in the excerpts: pointing at the evidence keeps the judge honest, and a
+    made-up or empty quote is caught here, not trusted. ("differences" is the
+    judge's reasoning before the verdict; also requiring it to be "none" was
+    too strict: it lists harmless nuances, 15 vs 17 of 19 agreeing labels.)"""
     for c in verdict["claims"]:
         c["quote_found"] = quote_in(c["quote"], sources)
-        c["judge_said"] = c["supported"]
-        c["supported"] = c["supported"] and c["quote_found"]
+        c["supported"] = c["verdict"] == "supported" and c["quote_found"]
     claims = verdict["claims"]
     verdict["faithful"] = all(c["supported"] for c in claims)
     verdict["support"] = sum(c["supported"] for c in claims) / len(claims) if claims else 1.0
-    if question.get("answerable", True) is False:
-        verdict["correct"] = verdict["refuses"]
-    else:
-        verdict["correct"] = verdict["answers_question"] == "yes"
+    verdict["rating"] = rating(verdict, answerable)
+    verdict["correct"] = verdict["rating"] == "yes"
     return verdict
+
+
+def rating(verdict, answerable=True):
+    """yes / partially / no: the judge's answers_question, with two rules.
+
+    - Out-of-scope questions: a refusal is the right answer. The judge flags it
+      in "refuses" or rates it "yes" (the reference says a correct answer
+      refuses); it isn't consistent about which, so either counts.
+    - A "yes" with a contradicted claim is only "partially": an answer that
+      gets a detail wrong isn't fully right (the labels' rule). The judge
+      often rated those "yes" anyway."""
+    if answerable is False:
+        return "yes" if verdict["refuses"] or verdict["answers_question"] == "yes" else "no"
+    if verdict["answers_question"] == "yes" and any(c["verdict"] == "contradicted" for c in verdict["claims"]):
+        return "partially"
+    return verdict["answers_question"]
+
+
+def why_unsupported(c):
+    """A short note on why a claim didn't count as supported."""
+    if c["verdict"] != "supported":
+        return c["verdict"] + ("" if c["differences"].strip().lower() in ("none", "") else f": {c['differences']}")
+    if not c["quote_found"]:
+        return "quote not found in the excerpts"
+    return f"differences: {c['differences']}"
 
 
 def summarise(rows):
@@ -169,31 +216,31 @@ def summarise(rows):
         lines.append(f"{name:<17}{len(g):>3}  {statistics.mean(v['faithful'] for v in g):>8.0%}"
                      f"  {statistics.mean(v['support'] for v in g):>9.0%}"
                      f"  {statistics.mean(v['correct'] for v in g):>7.0%}"
-                     f"  {statistics.mean(v['answers_question'] == 'partially' for v in g):>7.0%}")
+                     f"  {statistics.mean(v['rating'] == 'partially' for v in g):>7.0%}")
     if errors:
         lines.append(f"not judged ({len(errors)}): {', '.join(errors)}")
     return "\n".join(lines)
 
 
 def calibrate(rows, run_name):
-    """Agreement between the judge and the hand labels for this run."""
+    """Agreement between the judge and the hand labels for this run.
+
+    Reported per label set: "dev" labels were used to tune the prompt and
+    rules, so their agreement is optimistic; "heldout" labels never were."""
     labels = [json.loads(line) for line in LABELS.open(encoding="utf-8")] if LABELS.exists() else []
     labels = {l["id"]: l for l in labels if l["run"] == run_name}
     pairs = [(labels[r["id"]], r["judge"]) for r in rows if r["id"] in labels and "error" not in r["judge"]]
     if not pairs:
         sys.exit(f"no hand labels for run {run_name!r} in {LABELS}")
-    print(f"\ncalibration on {len(pairs)} hand-labelled answers:")
-    # For out-of-scope questions "answers the question" means refusing.
-    answerable = {json.loads(l)["id"]: json.loads(l).get("answerable", True)
-                  for l in (HERE / "eval" / "questions.jsonl").open(encoding="utf-8")}
-    verdict_of = {id(v): (v["answers_question"] if answerable.get(l["id"], True) else ("yes" if v["refuses"] else "no"))
-                  for l, v in pairs}
-    for key, judged in (("faithful", lambda v: v["faithful"]), ("correct", lambda v: verdict_of[id(v)])):
-        agree = [l[key] == judged(v) for l, v in pairs]
-        print(f"  {key:<9} judge agrees with the label on {sum(agree)}/{len(agree)} ({statistics.mean(agree):.0%})")
-        for (l, v), ok in zip(pairs, agree):
-            if not ok:
-                print(f"    {l['id']}: label {l[key]!r}, judge {judged(v)!r}  ({l.get('note', '')})")
+    for label_set in sorted({l.get("set", "dev") for l, _ in pairs}):
+        subset = [(l, v) for l, v in pairs if l.get("set", "dev") == label_set]
+        print(f"\ncalibration on {len(subset)} hand-labelled answers ({label_set}):")
+        for key, judged in (("faithful", lambda v: v["faithful"]), ("correct", lambda v: v["rating"])):
+            agree = [l[key] == judged(v) for l, v in subset]
+            print(f"  {key:<9} judge agrees with the label on {sum(agree)}/{len(agree)} ({statistics.mean(agree):.0%})")
+            for (l, v), ok in zip(subset, agree):
+                if not ok:
+                    print(f"    {l['id']}: label {l[key]!r}, judge {judged(v)!r}  ({l.get('note', '')})")
 
 
 def main():
@@ -234,15 +281,14 @@ def main():
             if "error" in v:
                 print(f"ERR {row['id']:<26} {v['error']}")
                 continue
-            bad = [c["claim"] + ("" if c["quote_found"] else "   [quote not found in the excerpts]" if c["judge_said"] else "")
-                   for c in v["claims"] if not c["supported"]]
+            bad = [f"{c['claim']}   [{why_unsupported(c)}]" for c in v["claims"] if not c["supported"]]
             mark = "ok " if v["faithful"] and v["correct"] else "BAD"
-            print(f"{mark} {row['id']:<26} faithful {str(v['faithful']):<5}  answers {v['answers_question']:<9}"
+            print(f"{mark} {row['id']:<26} faithful {str(v['faithful']):<5}  answers {v['rating']:<9}"
                   f"  claims {len(v['claims']) - len(bad)}/{len(v['claims'])}")
             for claim in bad:
                 print(f"    unsupported: {claim}")
             if args.show:
-                print(f"    reason: {v['reason']}")
+                print(f"    coverage: {v['coverage']}")
             log.debug(f"{n}/{len(rows)}")
     except Exception as e:
         message = explain(e)
