@@ -1,4 +1,8 @@
+from types import SimpleNamespace
+
 import pytest
+
+import ask
 
 from ask import MAX_ANSWER_TOKENS, MAX_THINKING_TOKENS, ThinkFilter, cited_numbers, max_answer_tokens, thinking_options
 
@@ -45,3 +49,68 @@ def test_thinking_options(think, options):
 def test_every_answer_is_capped(think, cap):
     """A request without a cap once generated 29k tokens and froze the PC."""
     assert max_answer_tokens(think) == cap <= 4096
+
+
+class FakeStream:
+    """Stands in for the OpenAI client's streamed chat completion."""
+    def __init__(self, reasoning, answer, finish=None):
+        self.pieces = [("reasoning", t) for t in reasoning] + [("content", t) for t in answer]
+        self.finish, self.closed = finish, False
+
+    def __iter__(self):
+        for n, (kind, text) in enumerate(self.pieces):
+            if self.closed:
+                return
+            last = n == len(self.pieces) - 1
+            delta = SimpleNamespace(content=text if kind == "content" else None,
+                                    reasoning=text if kind == "reasoning" else None)
+            yield SimpleNamespace(choices=[SimpleNamespace(delta=delta, finish_reason=self.finish if last else None)])
+
+    def close(self):
+        self.closed = True
+
+
+def fake_client(stream):
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kw: stream)))
+
+
+@pytest.mark.parametrize("reasoning_pieces, answer, think, forced", [
+    (10, ["Use a Suspicious Looking Eye [2]."], True, False),   # short reasoning: untouched
+    (ask.REASONING_BUDGET + 50, [], True, True),                # looping reasoning: stopped and forced
+    (ask.REASONING_BUDGET + 50, [], False, False),              # reasoning off: no budget applies
+])
+def test_reasoning_budget(monkeypatch, reasoning_pieces, answer, think, forced):
+    """A model that reasons past the budget gets stopped and made to answer
+    (8 of 92 answers were empty without this)."""
+    calls = []
+
+    def fake_finish(model, messages, reasoning, on_answer, temperature=None, seed=None):
+        calls.append(reasoning)
+        on_answer("Forced answer [1].")
+        return False
+
+    monkeypatch.setattr(ask, "finish_after_reasoning", fake_finish)
+    stream = FakeStream(["x"] * reasoning_pieces, answer)
+    result = ask.generate(fake_client(stream), "m", [], think)
+    assert result["budget_forced"] is forced
+    assert stream.closed is forced
+    assert result["answer"] == ("Forced answer [1]." if forced else "".join(answer))
+    if forced:
+        assert len(calls[0]) == ask.REASONING_BUDGET  # continues from exactly the reasoning so far
+
+
+def test_chatml_matches_qwen_format():
+    messages = [{"role": "system", "content": "Rules."}, {"role": "user", "content": "Q?"}]
+    assert ask.chatml(messages) == "<|im_start|>system\nRules.<|im_end|>\n<|im_start|>user\nQ?<|im_end|>\n"
+
+
+@pytest.mark.parametrize("env, think, model", [
+    (None, None, ask.THINK_MODEL),    # server default reasons: sampling model
+    (None, True, ask.THINK_MODEL),
+    (None, False, ask.ANSWER_MODEL),  # no reasoning: deterministic model
+    ("my-model", True, "my-model"),   # RAG_LLM_MODEL always wins
+])
+def test_model_for(monkeypatch, env, think, model):
+    """Reasoning at temperature 0 looped on up to a third of the questions."""
+    monkeypatch.setattr(ask, "LLM_MODEL", env)
+    assert ask.model_for(think) == model

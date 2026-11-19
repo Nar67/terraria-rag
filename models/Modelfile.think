@@ -1,0 +1,16 @@
+# qwen3.5-9b-rag-think: for answering WITH reasoning (--think / eval runs with
+# thinking on). Qwen's recommended thinking-mode sampling for Qwen3.5: they
+# warn against greedy decoding with thinking, and presence_penalty 1.5 is
+# their remedy for endless repetition. With temperature 0 (the default model)
+# a strict prompt made the reasoning walk every source line ("I will cite
+# [2]" x15) until the cap: 32-43 of 92 answers empty (DEVLOG §24-25).
+# Not deterministic: send a seed per request for repeatable runs.
+# Create or update with:  ollama create qwen3.5-9b-rag-think -f models/Modelfile.think
+FROM qwen3.5:9b
+PARAMETER temperature 1.0
+PARAMETER top_p 0.95
+PARAMETER top_k 20
+PARAMETER min_p 0
+PARAMETER presence_penalty 1.5
+# Safety cap on output length (DEVLOG §20).
+PARAMETER num_predict 4096

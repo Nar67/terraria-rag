@@ -100,19 +100,20 @@ def fact_found(fact, answer):
     return any(alt.strip().lower() in answer.lower() for alt in fact.split("|"))
 
 
-def ask_model(question, results, client, model, think=None, temperature=None):
-    """The model's answer, non-streaming, with any <think> block removed."""
-    from ask import build_messages, max_answer_tokens, thinking_options  # only needed with --answers
+def ask_model(question, results, client, model, think=None, temperature=None, max_tokens=None, seed=None):
+    """The model's answer (reasoning left out) and whether the reasoning budget
+    had to force it, through the same code path as ask.py.
 
-    extra = thinking_options(think)
-    sampling = {} if temperature is None else {"temperature": temperature}  # None: the model's own setting
-    reply = client.chat.completions.create(
-        model=model, messages=build_messages(question, results), stream=False,
-        max_tokens=max_answer_tokens(think), extra_body=extra or None, **sampling)
-    if reply.choices[0].finish_reason == "length":
-        log.warning(f"answer cut off at {max_answer_tokens(think)} tokens: {question[:60]}")
-    text = reply.choices[0].message.content or ""
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
+    temperature None: the model's own setting. max_tokens: output cap including
+    reasoning; None uses ask.py's cap. seed: repeatable runs with a sampling model."""
+    from ask import build_messages, generate  # only needed with --answers
+
+    result = generate(client, model, build_messages(question, results), think, temperature, seed, max_tokens)
+    if result["budget_forced"]:
+        log.info(f"reasoning budget reached, answer forced: {question[:60]}")
+    if result["cut_off"]:
+        log.warning(f"answer cut off: {question[:60]}")
+    return result["answer"], result["budget_forced"]
 
 
 def score_answer(q, answer):
@@ -180,6 +181,10 @@ def main():
     think = ap.add_mutually_exclusive_group()
     think.add_argument("--think", dest="think", action="store_true", default=None, help="with --answers: model reasons first")
     think.add_argument("--no-think", dest="think", action="store_false", help="with --answers: no reasoning (faster)")
+    ap.add_argument("--seed", type=int, help="with --answers: sampling seed, for repeatable runs when the model samples")
+    ap.add_argument("--max-tokens", type=int,
+                    help="with --answers: output cap including reasoning (default: ask.py's, 1024 / 4096). "
+                         "Overrides the Modelfile's num_predict for these requests.")
     ap.add_argument("--save", type=Path, help="write all results to this JSON file")
     add_logging_args(ap)
     args = ap.parse_args()
@@ -196,7 +201,7 @@ def main():
         client = OpenAI(base_url=LLM_URL, api_key=os.environ.get("RAG_LLM_KEY", "none"),
                         timeout=LLM_TIMEOUT, max_retries=1)
         try:
-            model = pick_model(client)
+            model = pick_model(client, args.think)
         except Exception as e:  # report server problems once, not per question
             sys.exit(explain(e) or str(e))
         log.info(f"answers from {model} at {LLM_URL}")
@@ -218,8 +223,9 @@ def main():
             row["history_ok"] = history_on == bool(q.get("history"))
         if client is not None:
             try:
-                row["answer"] = ask_model(q["question"], results, client, model, args.think,
-                                          None if args.temperature == "model" else float(args.temperature))
+                row["answer"], row["budget_forced"] = ask_model(
+                    q["question"], results, client, model, args.think,
+                    None if args.temperature == "model" else float(args.temperature), args.max_tokens, args.seed)
             except Exception as e:
                 from ask import explain
                 message = explain(e)

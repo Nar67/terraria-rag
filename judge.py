@@ -35,7 +35,7 @@ from pathlib import Path
 
 from openai import OpenAI
 
-from ask import (LLM_MODEL, LLM_TIMEOUT, LLM_URL, MAX_THINKING_TOKENS, explain, format_sources, pick_model,
+from ask import (LLM_TIMEOUT, LLM_URL, MAX_THINKING_TOKENS, explain, format_sources, pick_model,
                  thinking_options)
 from config import HERE, add_logging_args, setup_logging
 from search import open_collection
@@ -271,7 +271,7 @@ def main():
 
     client = OpenAI(base_url=LLM_URL, api_key=os.environ.get("RAG_LLM_KEY", "none"), timeout=LLM_TIMEOUT, max_retries=1)
     try:
-        model = pick_model(client) if LLM_MODEL == "" else LLM_MODEL
+        model = pick_model(client, think=False)  # deterministic model, also with --think: verdicts repeat
         collection = open_collection()
         log.info(f"judging {len(rows)} answers from {args.run.name} with {model}")
         for n, row in enumerate(rows, 1):
