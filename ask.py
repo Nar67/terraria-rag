@@ -7,6 +7,7 @@ Usage:
     uv run ask.py "Zenith recipe" --show-sources   # also print the retrieved chunks
     uv run ask.py "Zenith recipe" --dry-run        # print the prompt, call nothing
     uv run ask.py "best pre-hardmode armor" --think
+    uv run ask.py "which hardmode bosses are optional" --agent   # model searches several times
 
 How it works: search.py finds the top chunks (hybrid search), they go into the
 prompt numbered [1], [2], ..., and the model answers from them only, citing
@@ -101,9 +102,10 @@ Rules:
 DIM, RESET = "\033[2m", "\033[0m"
 
 
-def format_sources(results):
+def format_sources(results, start=1):
+    """The excerpts as the model sees them, numbered from start."""
     parts = []
-    for n, r in enumerate(results, 1):
+    for n, r in enumerate(results, start):
         tag = " (history)" if r["kind"] == "history" else ""
         # The chunk text starts with its section path, which names the page.
         parts.append(f"[{n}]{tag} {r['url']}\n{r['text']}")
@@ -299,8 +301,20 @@ def stream_answer(client, model, messages, think, temperature):
     return result["answer"]
 
 
-def ask(question, searcher, client, model, args):
-    results = searcher.search(question, k=args.k, mode=args.mode, history=args.history)
+def ask(question, searcher, client, model, args, planner=None):
+    """Answer one question. planner: the model that chooses searches in --agent mode."""
+    if args.agent:
+        from agent import research
+
+        def show_search(query, found):
+            titles = ", ".join(dict.fromkeys(r["title"] for r in found)) or "nothing new"
+            print(f"{DIM}search: {query}  ->  {len(found)} chunks: {titles}{RESET}")
+
+        results, _ = research(question, searcher, client, planner, k=args.k, history=args.history,
+                              on_search=show_search)
+        print()
+    else:
+        results = searcher.search(question, k=args.k, mode=args.mode, history=args.history)
     if args.show_sources or args.dry_run:
         include = wants_history(question) if args.history is None else args.history
         print(f"{DIM}retrieved {len(results)} chunks (history {'included' if include else 'left out'}):{RESET}")
@@ -351,6 +365,8 @@ def main():
                     help="sampling temperature (default: the model's own setting)")
     ap.add_argument("--show-sources", action="store_true", help="list the retrieved chunks before the answer")
     ap.add_argument("--dry-run", action="store_true", help="print the prompt and stop; no model needed")
+    ap.add_argument("--agent", action="store_true",
+                    help="let the model search the local index several times before answering (agent.py)")
     add_logging_args(ap)
     args = ap.parse_args()
     setup_logging(args)
@@ -359,15 +375,17 @@ def main():
     client = OpenAI(base_url=LLM_URL, api_key=os.environ.get("RAG_LLM_KEY", "none"),
                     timeout=LLM_TIMEOUT, max_retries=1)
 
-    model = None
+    model = planner = None
 
     def run(question):
         """Answer one question; return an error message instead of raising."""
-        nonlocal model
+        nonlocal model, planner
         try:
             if model is None and not args.dry_run:
                 model = pick_model(client, args.think)
-            ask(question, searcher, client, model, args)
+            if args.agent and planner is None:  # choosing searches needs no reasoning: fast, repeatable
+                planner = pick_model(client, think=False)
+            ask(question, searcher, client, model, args, planner)
         except openai.OpenAIError as e:
             message = explain(e)
             if message is None:

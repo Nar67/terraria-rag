@@ -175,6 +175,9 @@ def main():
     ap.add_argument("--only", help="run one category or one question id")
     ap.add_argument("--misses", action="store_true", help="list the retrieved chunks of imperfect questions")
     ap.add_argument("--answers", action="store_true", help="also ask the model and check the answers")
+    ap.add_argument("--agent", action="store_true",
+                    help="retrieve with agent mode (the model searches several times, agent.py); "
+                         "retrieval scores then cover all collected chunks, not just k")
     ap.add_argument("--temperature", default="model",
                     help='with --answers: sampling temperature; "model" (default) sends none, so the '
                          "model's own setting (e.g. from an Ollama Modelfile) applies")
@@ -192,8 +195,8 @@ def main():
 
     questions = load_questions(args.questions, args.only)
     searcher = Searcher()
-    client = model = None
-    if args.answers:
+    client = model = planner = None
+    if args.answers or args.agent:
         import openai  # noqa: F401  (fail early if missing)
         from ask import LLM_TIMEOUT, LLM_URL, explain, pick_model
         from openai import OpenAI
@@ -201,10 +204,15 @@ def main():
         client = OpenAI(base_url=LLM_URL, api_key=os.environ.get("RAG_LLM_KEY", "none"),
                         timeout=LLM_TIMEOUT, max_retries=1)
         try:
-            model = pick_model(client, args.think)
+            model = pick_model(client, args.think) if args.answers else None
+            planner = pick_model(client, think=False) if args.agent else None
         except Exception as e:  # report server problems once, not per question
             sys.exit(explain(e) or str(e))
-        log.info(f"answers from {model} at {LLM_URL}")
+        if model:
+            log.info(f"answers from {model} at {LLM_URL}")
+        if planner:
+            from agent import research
+            log.info(f"agent searches planned by {planner}")
 
     knobs = {name: getattr(args, name) for name in ("pool", "vector_weight", "title_boost", "trivia_weight", "title_max_share", "spell_cutoff")}
     knobs = {name: value for name, value in knobs.items() if value is not None}
@@ -212,7 +220,11 @@ def main():
     rows = []
     started = time.time()
     for q in questions:
-        results = searcher.search(q["question"], k=args.k, mode=args.mode, **knobs)
+        trace = None
+        if args.agent:
+            results, trace = research(q["question"], searcher, client, planner, k=args.k)
+        else:
+            results = searcher.search(q["question"], k=args.k, mode=args.mode, **knobs)
         history_on = wants_history(q["question"])
         row = {"id": q["id"], "category": q["category"], "question": q["question"],
                "answerable": q.get("answerable", True), "history_on": history_on,
@@ -221,7 +233,9 @@ def main():
         if row["answerable"]:
             row.update(score_retrieval(q, results))
             row["history_ok"] = history_on == bool(q.get("history"))
-        if client is not None:
+        if trace is not None:
+            row["agent_trace"] = trace
+        if args.answers:
             try:
                 row["answer"], row["budget_forced"] = ask_model(
                     q["question"], results, client, model, args.think,
