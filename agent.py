@@ -51,7 +51,7 @@ TOOLS = [SEARCH_TOOL]
 
 def _fact_tool(name, description, arg):
     properties = {arg: {"type": "string", "description": "exact wiki page name, e.g. \"King Slime\""}}
-    if name != "recipe":
+    if name not in ("recipe", "conditions"):
         properties["mode"] = {"type": "string", "enum": ["classic", "expert", "master"],
                               "description": "only this difficulty (leave out for all)"}
     return {"type": "function", "function": {"name": name, "description": description,
@@ -63,10 +63,12 @@ FACT_TOOLS = [
     _fact_tool("drops", "Everything an enemy or boss drops, with rates per difficulty, groups and Treasure Bag contents.", "name"),
     _fact_tool("stats", "Health, damage, defense etc. of an enemy or boss per difficulty, plus its type and environment.", "name"),
     _fact_tool("recipe", "How an item is crafted: ingredients with amounts and the crafting station.", "item"),
+    _fact_tool("conditions", "What makes an enemy, boss, NPC or event spawn, appear, move in or start: "
+               "biome, layer, time, Hardmode, bosses defeated, special rules.", "name"),
 ]
 FACT_PROMPT = """
 
-You can also look up exact data from the wiki's infoboxes, more reliable than reading tables: drops(name, mode) for what an enemy or boss drops and how often per difficulty, stats(name, mode) for its health, damage and defense, recipe(item) for how an item is crafted. Use them for questions about drops, stats or crafting, and for the items, bosses or ingredients an answer depends on."""
+You can also look up exact data from the wiki's infoboxes, more reliable than reading tables: drops(name, mode) for what an enemy or boss drops and how often per difficulty, stats(name, mode) for its health, damage and defense, recipe(item) for how an item is crafted, conditions(name) for what makes an enemy, boss, NPC or event spawn, appear, move in or start. Use them for questions about drops, stats, crafting or spawning, and for the items, bosses or ingredients an answer depends on."""
 
 
 def research(question, searcher, client, model, k=8, history=None, steps=AGENT_STEPS,
@@ -140,7 +142,7 @@ def _call(call, facts):
     if name == "search":
         query = str(args.get("query", "")).strip()
         return (query or None), None
-    if facts is None or name not in ("drops", "stats", "recipe"):
+    if facts is None or name not in ("drops", "stats", "recipe", "conditions"):
         return None, None
     target = str(args.get("item" if name == "recipe" else "name", "")).strip()
     mode = args.get("mode") if args.get("mode") in ("classic", "expert", "master") else None

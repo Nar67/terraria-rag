@@ -142,3 +142,46 @@ def test_fact_text(book):
 ])
 def test_asked_mode(question, mode):
     assert asked_mode(question) == mode
+
+
+from facts import parse_conditions  # noqa: E402
+
+PAGE_MD = """# Nurse
+
+Source: https://terraria.wiki.gg/wiki/Nurse
+License: CC BY-NC-SA 4.0
+
+Infobox: Nurse
+[Statistics]
+Type: NPC
+Environment: Valid house
+- Some drop: 100%
+
+The Nurse is an NPC who will move in once the following criteria have been met:
+- There is an available vacant house.
+- The player's maximum health is greater than 100.
+
+## Spawn conditions
+- Only after the Merchant is present.
+
+## Notes
+- She will not move in if the house is in an evil biome.
+- Healing costs 1 Copper per health.
+"""
+
+
+def test_parse_conditions():
+    c = parse_conditions(PAGE_MD, "Nurse")
+    assert "will move in once" in c["intro"] and "greater than 100" in c["intro"]  # the list after the intro
+    assert "Some drop" not in c["intro"] and "Type: NPC" not in c["intro"]       # infobox lines left out
+    assert [s["heading"] for s in c["sections"]] == ["Spawn conditions"]
+    assert c["notes"] == ["- She will not move in if the house is in an evil biome."]  # healing tip left out
+
+
+@pytest.mark.parametrize("question, wanted", [
+    ("Where does King Slime spawn?", True),
+    ("What comes after King Slime?", False),     # progression, not spawning
+    ("How do I beat King Slime?", False),
+])
+def test_conditions_trigger(book, question, wanted):
+    assert any(s["id"].startswith("facts:conditions") for s in book.for_question(question)) is wanted

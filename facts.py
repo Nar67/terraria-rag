@@ -34,7 +34,7 @@ from collections import Counter
 
 from bs4 import BeautifulSoup
 
-from config import HERE, INDEX_DIR, add_logging_args, setup_logging
+from config import HERE, INDEX_DIR, TEXT_DIR, add_logging_args, setup_logging
 from download import page_url
 
 log = logging.getLogger("rag.facts")
@@ -212,6 +212,60 @@ def parse_page(html, page):
     return {"npcs": parse_npcs(soup, page), "recipes": parse_recipes(soup, page)}
 
 
+# Conditions (phase 3): what makes something spawn, appear, move in or start.
+# Unlike stats and drops this is prose, spread over a page: the intro, a few
+# sections, the transcluded "special spawning restrictions" list and some
+# Notes bullets. They are read from the extracted text (text/*.md) and put
+# together in one place, so the model gets one checklist-like source instead
+# of picking the pieces out of several chunks.
+CONDITION_HEADING = re.compile(r"spawn|summon(?!.*weapon)|condition|criteria|requirement|occurr|arriv|trigger|growing", re.I)
+CONDITION_WORDS = re.compile(r"\b(only|not|never|must|requires?|cannot|can't|won't|unless|after|before|once|"
+                             r"chance|until|at least|if)\b", re.I)
+ABOUT_SPAWNING = re.compile(r"spawn|appear|move in|moves in|arriv|summon|occur|generat|lands?\b|start|trigger", re.I)
+MAX_INTRO, MAX_SECTION, MAX_NOTES = 900, 1200, 8
+
+
+def parse_conditions(md, page):
+    """Condition text of one page, or None if it has none worth keeping."""
+    lines = md.splitlines()
+    heads = [(i, len(m.group(1)), m.group(2)) for i, l in enumerate(lines) if (m := re.match(r"(#{2,4}) (.*)", l))]
+    first_head = heads[0][0] if heads else len(lines)
+
+    # intro: the prose before the first heading, minus title, source and infobox lines
+    intro, in_infobox = [], False
+    for line in lines[:first_head]:
+        if not line.strip():
+            in_infobox = False
+            continue
+        if line.startswith(("# ", "Source:", "License:", "“")) or line.startswith("Infobox:"):
+            in_infobox = line.startswith("Infobox:") or in_infobox
+            continue
+        if in_infobox or line.startswith("[") or re.match(r"[\w ()'/]+: ", line):
+            continue
+        intro.append(line.strip())  # including lists ("will move in once ...: - ...")
+    intro_text = "\n".join(intro)[:MAX_INTRO]
+
+    def body(start, level):
+        end = next((i for i, lv, _ in heads if i > start and lv <= level), len(lines))
+        return "\n".join(l for l in lines[start + 1:end] if l.strip())
+
+    sections = [{"heading": h, "text": body(i, lv)[:MAX_SECTION]}
+                for i, lv, h in heads if CONDITION_HEADING.search(h) and not h.lower().startswith("despawn")]
+    special, notes = [], []
+    for i, line in enumerate(lines):
+        if re.search(r"special spawning restrictions|can only spawn if", line, re.I):
+            special = [line.strip()] + [l.rstrip() for l in lines[i + 1:i + 14] if l.startswith("  ")]
+            break
+    for i, lv, h in heads:
+        if h.lower() == "notes":
+            notes = [l.strip() for l in body(i, lv).splitlines()
+                     if l.startswith("- ") and CONDITION_WORDS.search(l) and ABOUT_SPAWNING.search(l)][:MAX_NOTES]
+    if not (sections or special or notes or intro_text):
+        return None
+    return {"page": page, "url": page_url(page), "intro": intro_text, "sections": sections,
+            "special_rules": "\n".join(special), "notes": notes}
+
+
 def build():
     files = sorted(HTML_DIR.glob("*.html.gz"))
     if not files:
@@ -238,6 +292,18 @@ def build():
         if n % 500 == 0:
             log.info(f"{n}/{len(files)} pages")
     facts["recipes"] = list(recipes.values())
+    # conditions for pages with an NPC infobox (creatures, town NPCs, bosses)
+    # or with a condition-like section (events, Plantera's Bulb, ...)
+    npc_pages = {n["page"] for n in facts["npcs"]}
+    facts["conditions"] = {}
+    for path in sorted(TEXT_DIR.glob("*.md")):
+        page = path.stem
+        md = path.read_text(encoding="utf-8")
+        if page in npc_pages or any(CONDITION_HEADING.search(h) for h in re.findall(r"(?m)^#{2,4} (.*)", md)):
+            entry = parse_conditions(md, page)
+            if entry:
+                facts["conditions"][page] = entry
+    seen["pages with conditions"] = len(facts["conditions"])
     FACTS.parent.mkdir(parents=True, exist_ok=True)
     tmp = FACTS.with_suffix(".json.part")
     tmp.write_text(json.dumps(facts, ensure_ascii=False), encoding="utf-8")
@@ -255,6 +321,14 @@ def build():
 ASKS_DROPS = re.compile(r"\b(drops?|dropped|loot|treasure bag)\b", re.I)
 ASKS_STATS = re.compile(r"\b(health|life|hp|damage|defen[cs]e|stats?|knockback)\b", re.I)
 ASKS_RECIPE = re.compile(r"\b(craft\w*|recipes?|make|made|ingredients?)\b", re.I)
+ASKS_CONDITIONS = re.compile(r"\b(spawn\w*|appear\w*|shows? up|show up|mov\w* in|arriv\w*|summon\w*|trigger\w*|"
+                             r"start\w*|occur\w*|happen\w*)\b", re.I)
+MAX_CONDITIONS = 2500  # characters of one conditions source
+# "what comes / happens after X" is progression, not how X spawns
+ASKS_WHATS_NEXT = re.compile(r"\b(what (comes|happens|now|next)|next|after (i|you) (kill|beat|defeat))", re.I)
+# page names that are also everyday words of the questions themselves
+GENERIC_NAMES = {"spawn", "summon", "craft", "crafting", "drop", "drops", "loot", "recipe", "recipes",
+                 "health", "life", "damage", "defense", "luck", "fishing", "house", "time"}
 MAX_RECIPES = 6  # some items have many alternative recipes
 MODE_WORDS = {"classic": r"\b(classic|normal)\b", "expert": r"\bexpert\b", "master": r"\bmaster\b"}
 
@@ -280,13 +354,14 @@ class FactBook:
                 self.npcs.setdefault(name.lower(), []).append(npc)
         for recipe in data["recipes"]:
             self.recipes.setdefault(recipe["result"].lower(), []).append(recipe)
+        self.conditions_by = {page.replace("_", " ").lower(): c for page, c in data.get("conditions", {}).items()}
         names = set(self.npcs) | set(self.recipes)
         # also written as one word ("moonlord", "kingslime"), as players often do
-        for table in (self.npcs, self.recipes):
+        for table in (self.npcs, self.recipes, self.conditions_by):
             for name in list(table):
                 if " " in name and len(name) > 8:
                     table.setdefault(name.replace(" ", ""), table[name])
-        names = set(self.npcs) | set(self.recipes)
+        names = (set(self.npcs) | set(self.recipes) | set(self.conditions_by)) - GENERIC_NAMES
         # longest first, so "Eye of Cthulhu" wins over "The Eye of Cthulhu" parts etc.
         self.names = sorted(names, key=len, reverse=True)
 
@@ -342,10 +417,35 @@ class FactBook:
             lines.append(f"- ... and {len(recipes) - MAX_RECIPES} more recipes")
         return _source(recipes[0], "recipe", "\n".join(lines), subject=recipes[0]["result"])
 
+    def conditions(self, name):
+        """What makes it spawn, appear, move in or start: infobox environment
+        and Hardmode flag, the page intro, condition sections, the special
+        spawning rules and condition-like Notes, in one source."""
+        cond = self.conditions_by.get(name.lower())
+        boxes = _distinct(self.npcs.get(name.lower(), []))
+        if cond is None and not boxes:
+            return None
+        lines = []
+        for box in boxes[:3]:  # forms and parts share their environment; a few are enough
+            tags = "; ".join(f"{k}: {', '.join(v)}" for k, v in box["tags"].items())
+            lines.append(f"{box['name']}{' (Hardmode only)' if box['hardmode_only'] else ''}: {tags}")
+        if cond:
+            if cond["intro"]:
+                lines.append(cond["intro"])
+            for section in cond["sections"]:
+                lines.append(f"{section['heading']}:\n{section['text']}")
+            if cond["special_rules"]:
+                lines.append(f"Special spawning rules:\n{cond['special_rules']}")
+            notes = [n for n in cond["notes"] if not cond["special_rules"] or n[2:40] not in cond["special_rules"]]
+            if notes:
+                lines.append("Notes:\n" + "\n".join(notes))
+        entry = cond or boxes[0]
+        return _source(entry, "conditions", "\n".join(lines)[:MAX_CONDITIONS])
+
     def lookup(self, kind, name, mode=None):
-        """One tool call: kind is "drops", "stats" or "recipe"."""
-        if kind == "recipe":
-            return self.recipe(name)
+        """One tool call: kind is "drops", "stats", "recipe" or "conditions"."""
+        if kind in ("recipe", "conditions"):
+            return getattr(self, kind)(name)
         return getattr(self, kind)(name, mode)
 
     def for_question(self, question):
@@ -359,6 +459,8 @@ class FactBook:
                 sources.append(self.stats(name, mode))
             if ASKS_RECIPE.search(question):
                 sources.append(self.recipe(name))
+            if ASKS_CONDITIONS.search(question) and not ASKS_WHATS_NEXT.search(question):
+                sources.append(self.conditions(name))
         unique = {s["id"]: s for s in sources if s}
         return list(unique.values())
 
