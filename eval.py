@@ -245,6 +245,7 @@ def main():
             row["agent_trace"] = trace
         if args.answers:
             try:
+                answer_started = time.time()
                 row["answer"], row["budget_forced"] = ask_model(
                     q["question"], results, client, model, args.think,
                     None if args.temperature == "model" else float(args.temperature), args.max_tokens, args.seed)
@@ -254,6 +255,7 @@ def main():
                 if message is None:
                     raise
                 sys.exit(message)
+            row["seconds"] = round(time.time() - answer_started, 1)  # model time for this answer
             row.update(score_answer(q, row["answer"]))
         rows.append(row)
 
