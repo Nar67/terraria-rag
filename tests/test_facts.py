@@ -1,0 +1,91 @@
+"""facts.py on small HTML snippets copied from the real wiki markup
+(King Slime, Mothron, Eye of Cthulhu, Wooden Arrow, Recipes/Work Bench)."""
+import pytest
+from bs4 import BeautifulSoup
+
+from facts import MODES, mode_values, modes_of, parse_page
+
+
+@pytest.mark.parametrize("classes, modes", [
+    (["m-normal", "m-journey"], {"classic"}),
+    (["m-expert-master"], {"expert", "master"}),
+    (["m-normal-expert-master"], set(MODES)),
+    (["m-all"], set(MODES)),
+    (["mode-exclusive", "expert"], set()),  # styling class, not a mode marker
+])
+def test_modes_of(classes, modes):
+    assert modes_of(classes) == modes
+
+
+@pytest.mark.parametrize("cell, values", [
+    # one value per mode, the Expert/Master ones wrapped in links (Mothron Wings)
+    ('<td><span class="mode-content"><span class="m-normal m-journey">5%</span>'
+     '<span class="m-expert-master"><a href="/wiki/Expert_Mode"><span class="mode-exclusive expert">9.75%</span></a>'
+     '</span></span></td>', {"classic": "5%", "expert": "9.75%", "master": "9.75%"}),
+    # no mode markers: same everywhere
+    ("<td>10%</td>", {"classic": "10%", "expert": "10%", "master": "10%"}),
+    # phase thresholds stay together per mode (Eye of Cthulhu, second form)
+    ('<td><span class="m-normal">1400/2800</span><span class="m-expert">2366/3640</span>'
+     '<span class="m-master">3016/4641</span></td>', {"classic": "1400/2800", "expert": "2366/3640", "master": "3016/4641"}),
+])
+def test_mode_values(cell, values):
+    assert mode_values(BeautifulSoup(cell, "lxml").td) == values
+
+
+NPC = """<div class="infobox npc modesbox"><div class="title">Mothron Hardmode exclusive</div>
+<div class="section statistics"><table class="stat">
+ <tr><th>Type</th><td><div class="tags"><span class="tag"><a>Boss</a></span></div></td></tr>
+ <tr><th>Max Life</th><td><span class="npcstat"><span class="m-normal m-journey">6000</span>
+   <span class="m-expert">12000</span><span class="m-master">18000</span></span></td></tr>
+ <tr><th>Defense</th><td><span class="npcstat"><span class="m-all">50</span></span></td></tr>
+</table></div>
+<ul class="drops items">
+ <li><strong>Item</strong><strong>Rate</strong></li>
+ <li class="m-normal"><div><span class="i"><a title="Broken Hero Sword">Broken Hero Sword</a></span></div><div>25%</div></li>
+ <li class="groupstart caption m-normal">One of the following 2 items will be dropped<sup class="reference">[1]</sup></li>
+ <li class="m-normal group"><div><span class="i"><a title="Moth Wings">Moth Wings</a></span></div><div>50%</div></li>
+ <li class="groupend m-normal"></li>
+ <li><div><span class="i"><a title="Luminite">Luminite</a> (70–90)</span></div><div>100%</div></li>
+ <li class="lootstart m-expert-master"></li>
+ <li class="m-expert-master loot"><div><span class="i"><a title="Gravity Globe">Gravity Globe</a></span></div><div>100%</div></li>
+ <li class="m-master"><div><span class="i"><a title="Badger's Hat">Badger's Hat</a> (when defeated on the same day)</span></div><div>100%</div></li>
+</ul></div>"""
+
+
+def test_parse_npc():
+    npc = parse_page(NPC, "Mothron")["npcs"][0]
+    assert npc["name"] == "Mothron" and npc["hardmode_only"]
+    assert npc["tags"]["Type"] == ["Boss"]
+    assert npc["stats"]["Max Life"] == {"classic": "6000", "expert": "12000", "master": "18000"}
+    assert npc["stats"]["Defense"] == {m: "50" for m in MODES}
+    drops = {d["item"]: d for d in npc["drops"]}
+    assert drops["Broken Hero Sword"]["rate"] == {"classic": "25%"}       # Classic only
+    assert drops["Moth Wings"]["group"].startswith("One of the following 2")  # footnote [1] removed
+    assert drops["Luminite"]["quantity"] == "70–90" and drops["Luminite"]["group"] is None
+    assert drops["Gravity Globe"]["from_treasure_bag"]
+    assert drops["Badger's Hat"]["condition"] == "when defeated on the same day"
+    assert drops["Badger's Hat"]["rate"] == {"master": "100%"}
+
+
+RECIPES = """<table class="recipes">
+ <tr><th class="result">Result</th><th class="ingredients">Ingredients</th><th class="station">Crafting station</th></tr>
+ <tr><td class="result" rowspan="2"><span class="eico"><a title="Desktop version">only:</a></span>
+   <span class="i"><a title="Wooden Arrow">Wooden Arrow</a></span><span class="am">25</span></td>
+   <td class="ingredients"><ul><li><span class="i"><a title="Wood">Wood</a></span></li>
+   <li><span class="i"><a title="Stone Block">Stone Block</a></span></li></ul></td>
+   <td class="station" rowspan="2">Work Bench</td></tr>
+ <tr><td class="ingredients"><ul><li><span class="i"><a title="Lens">Lens</a></span><span class="am">6</span></li></ul></td></tr>
+</table>"""
+
+
+def test_parse_recipes_with_rowspan_and_version_note():
+    recipes = parse_page(RECIPES, "Wooden_Arrow")["recipes"]
+    assert [(r["result"], r["amount"], r["station"]) for r in recipes] == [("Wooden Arrow", "25", "Work Bench")] * 2
+    assert recipes[1]["ingredients"] == [{"item": "Lens", "amount": "6"}]  # second row inherits result + station
+
+
+def test_station_from_listing_page():
+    table = """<table class="recipes"><tr><th>Result</th><th>Ingredients</th></tr>
+      <tr><td class="result"><span class="i"><a title="Chair">Chair</a></span></td>
+      <td class="ingredients"><ul><li><span class="i"><a title="Wood">Wood</a></span><span class="am">4</span></li></ul></td></tr></table>"""
+    assert parse_page(table, "Recipes%2FWork_Bench")["recipes"][0]["station"] == "Work Bench"
