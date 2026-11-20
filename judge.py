@@ -43,7 +43,7 @@ from search import open_collection
 log = logging.getLogger("rag.judge")
 
 LABELS = HERE / "eval" / "judge-labels.jsonl"
-MAX_VERDICT_TOKENS = 3072  # ~20 claims with their quotes and differences
+MAX_VERDICT_TOKENS = 4096  # ~20+ claims with quotes and differences; 3,072 cut off 1-2 long drop lists per run
 
 # Prompt design (DEVLOG §23, after the Hugging Face "LLM as a judge" cookbook):
 # the judge writes its evidence and reasoning *before* each decision (quote,
@@ -227,6 +227,23 @@ def summarise(rows):
     return "\n".join(lines)
 
 
+def cohen_kappa(a, b):
+    """Agreement between two raters beyond chance: (p_o - p_e) / (1 - p_e).
+
+    Raw agreement flatters a judge when one answer dominates (if 80% of the
+    labels are "faithful", always saying "faithful" agrees 80%); kappa is 0
+    for chance-level agreement and 1 for perfect agreement. Rough reading:
+    < 0.4 weak, 0.4-0.6 moderate, > 0.6 substantial. None if undefined
+    (both raters always gave the same single value)."""
+    n = len(a)
+    if n == 0:
+        return None
+    observed = sum(x == y for x, y in zip(a, b)) / n
+    categories = set(a) | set(b)
+    expected = sum((a.count(c) / n) * (b.count(c) / n) for c in categories)
+    return None if expected == 1 else (observed - expected) / (1 - expected)
+
+
 def calibrate(rows, run_name):
     """Agreement between the judge and the hand labels for this run.
 
@@ -242,7 +259,9 @@ def calibrate(rows, run_name):
         print(f"\ncalibration on {len(subset)} hand-labelled answers ({label_set}):")
         for key, judged in (("faithful", lambda v: v["faithful"]), ("correct", lambda v: v["rating"])):
             agree = [l[key] == judged(v) for l, v in subset]
-            print(f"  {key:<9} judge agrees with the label on {sum(agree)}/{len(agree)} ({statistics.mean(agree):.0%})")
+            kappa = cohen_kappa([l[key] for l, _ in subset], [judged(v) for _, v in subset])
+            print(f"  {key:<9} judge agrees with the label on {sum(agree)}/{len(agree)} ({statistics.mean(agree):.0%}),"
+                  f" kappa {'n/a' if kappa is None else f'{kappa:.2f}'}")
             for (l, v), ok in zip(subset, agree):
                 if not ok:
                     print(f"    {l['id']}: label {l[key]!r}, judge {judged(v)!r}  ({l.get('note', '')})")

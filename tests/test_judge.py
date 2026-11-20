@@ -62,3 +62,21 @@ def test_score_rating(answers, refuses, claims, answerable, rating):
     scored = score(verdict, SOURCES, answerable)
     assert scored["rating"] == rating
     assert scored["correct"] is (rating == "yes")
+
+
+from judge import cohen_kappa  # noqa: E402
+
+
+@pytest.mark.parametrize("a, b, kappa", [
+    ([True, False, True, False], [True, False, True, False], 1.0),     # perfect
+    ([True, True, False, False], [True, False, True, False], 0.0),     # chance level
+    # 80% raw agreement, but the judge just says True for everything: kappa 0
+    ([True, True, True, True, False], [True, True, True, True, True], 0.0),
+    (["yes", "partially", "no", "yes"], ["yes", "partially", "yes", "yes"], 5 / 9),  # (0.75 - 0.4375) / 0.5625
+])
+def test_cohen_kappa(a, b, kappa):
+    assert cohen_kappa(a, b) == pytest.approx(kappa)
+
+
+def test_cohen_kappa_undefined():
+    assert cohen_kappa([True, True], [True, True]) is None
