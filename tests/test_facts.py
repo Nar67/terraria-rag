@@ -119,6 +119,7 @@ def book(tmp_path):
     ("what does kingslime drop", ["facts:drops:King Slime"]),           # written as one word
     ("How much health does King Slime have?", ["facts:stats:King Slime"]),
     ("How do I make a Suspicious Looking Eye?", ["facts:recipe:Suspicious Looking Eye"]),
+    ("How do I craft Suspicious Looking Eyes?", ["facts:recipe:Suspicious Looking Eye"]),  # plural
     ("How do I beat King Slime?", []),                                   # no drops/stats/crafting word
     ("What does the Wall of Flesh drop?", []),                           # no facts for it
 ])

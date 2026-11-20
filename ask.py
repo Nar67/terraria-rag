@@ -97,7 +97,8 @@ Rules:
 - Sources marked "history" are changelogs of past game versions. Use them only for questions about versions or changes, and never present an old value as the current one.
 - Values often differ by difficulty (Classic / Expert / Master) or platform; say so when it matters.
 - State the requirements the sources give: whether something is Hardmode-only, needs a boss to be defeated first, or depends on the biome, layer, time of day or an event.
-- Be direct and short. Use a list for recipes, steps and drops."""
+- Be direct and short. Use a list for recipes, steps and drops.
+- For drops, give each item's drop chance, and its quantity, when the sources list them; if the chances differ by difficulty, say which difficulty each one is for."""
 
 DIM, RESET = "\033[2m", "\033[0m"
 

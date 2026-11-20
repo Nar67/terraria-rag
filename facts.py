@@ -294,7 +294,8 @@ class FactBook:
         """Known NPC/item names in the question, longest match first, no overlaps."""
         q, found, taken = question.lower(), [], []
         for name in self.names:
-            for m in re.finditer(rf"(?<![\w']){re.escape(name)}(?![\w])", q):
+            # plural allowed: "Hellstone Bars", "Greater Healing Potions"
+            for m in re.finditer(rf"(?<![\w']){re.escape(name)}(?:e?s)?(?![\w])", q):
                 if not any(a < m.end() and m.start() < b for a, b in taken):
                     found.append(name)
                     taken.append(m.span())
