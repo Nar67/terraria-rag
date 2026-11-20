@@ -301,8 +301,9 @@ def stream_answer(client, model, messages, think, temperature):
     return result["answer"]
 
 
-def ask(question, searcher, client, model, args, planner=None):
-    """Answer one question. planner: the model that chooses searches in --agent mode."""
+def ask(question, searcher, client, model, args, planner=None, book=None):
+    """Answer one question. planner: the model that chooses searches in --agent
+    mode. book: the FactBook (facts.py), None with --no-facts."""
     if args.agent:
         from agent import research
 
@@ -311,10 +312,12 @@ def ask(question, searcher, client, model, args, planner=None):
             print(f"{DIM}search: {query}  ->  {len(found)} chunks: {titles}{RESET}")
 
         results, _ = research(question, searcher, client, planner, k=args.k, history=args.history,
-                              on_search=show_search)
+                              on_search=show_search, facts=book)
         print()
     else:
         results = searcher.search(question, k=args.k, mode=args.mode, history=args.history)
+        if book is not None:  # resolved stats/drops/recipes first, then the chunks
+            results = book.for_question(question) + results
     if args.show_sources or args.dry_run:
         include = wants_history(question) if args.history is None else args.history
         print(f"{DIM}retrieved {len(results)} chunks (history {'included' if include else 'left out'}):{RESET}")
@@ -367,11 +370,15 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="print the prompt and stop; no model needed")
     ap.add_argument("--agent", action="store_true",
                     help="let the model search the local index several times before answering (agent.py)")
+    ap.add_argument("--no-facts", dest="facts", action="store_false",
+                    help="don't add fact sources (NPC stats, drops, recipes from facts.py)")
     add_logging_args(ap)
     args = ap.parse_args()
     setup_logging(args)
 
     searcher = Searcher()
+    from facts import open_factbook
+    book = open_factbook(args.facts)
     client = OpenAI(base_url=LLM_URL, api_key=os.environ.get("RAG_LLM_KEY", "none"),
                     timeout=LLM_TIMEOUT, max_retries=1)
 
@@ -385,7 +392,7 @@ def main():
                 model = pick_model(client, args.think)
             if args.agent and planner is None:  # choosing searches needs no reasoning: fast, repeatable
                 planner = pick_model(client, think=False)
-            ask(question, searcher, client, model, args, planner)
+            ask(question, searcher, client, model, args, planner, book)
         except openai.OpenAIError as e:
             message = explain(e)
             if message is None:

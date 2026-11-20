@@ -57,3 +57,30 @@ def test_research_step_limit():
     many = [[f"topic {i}"] for i in range(10)]
     results, trace = agent.research("Q", FakeSearcher(), fake_client(many), "m", k=1)
     assert len(trace) == 1 + agent.AGENT_STEPS
+
+
+def test_fact_tools(monkeypatch):
+    """drops/stats/recipe calls return one fact source each; unknown names are said so."""
+    class Book:
+        def for_question(self, q):
+            return []
+
+        def lookup(self, kind, name, mode=None):
+            if name != "King Slime":
+                return None
+            return {"id": f"facts:{kind}:{name}", "title": name, "sections": [name], "kind": "facts",
+                    "url": "u", "text": f"{name} {kind} {mode}"}
+
+    def call(tool, **args):
+        return SimpleNamespace(id=tool, function=SimpleNamespace(name=tool, arguments=json.dumps(args)))
+
+    replies = iter([[call("drops", name="King Slime", mode="expert"), call("stats", name="Nobody")], []])
+
+    def create(**kwargs):
+        calls = next(replies)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="", tool_calls=calls or None))])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    results, trace = agent.research("Q", FakeSearcher(), client, "m", k=2, facts=Book())
+    assert [r["id"] for r in results][-1] == "facts:drops:King Slime"
+    assert [t["query"] for t in trace] == ["Q", "drops(King Slime, expert)", "stats(Nobody)"]
+    assert trace[-1]["found"] == []

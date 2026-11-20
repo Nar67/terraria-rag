@@ -247,6 +247,185 @@ def build():
         log.info(f"  {key}: {value}")
 
 
+# ---------------------------------------------------------------------------
+# Lookups: facts.json -> small, already-resolved sources for the model.
+# A fact source looks like a search result ({"id", "title", "sections",
+# "kind": "facts", "url", "text"}), so it is numbered and cited like a chunk.
+
+ASKS_DROPS = re.compile(r"\b(drops?|dropped|loot|treasure bag)\b", re.I)
+ASKS_STATS = re.compile(r"\b(health|life|hp|damage|defen[cs]e|stats?|knockback)\b", re.I)
+ASKS_RECIPE = re.compile(r"\b(craft\w*|recipes?|make|made|ingredients?)\b", re.I)
+MAX_RECIPES = 6  # some items have many alternative recipes
+MODE_WORDS = {"classic": r"\b(classic|normal)\b", "expert": r"\bexpert\b", "master": r"\bmaster\b"}
+
+
+def asked_mode(question):
+    """The difficulty a question asks about, if exactly one is named."""
+    found = [m for m, pattern in MODE_WORDS.items() if re.search(pattern, question, re.I)]
+    return found[0] if len(found) == 1 else None
+
+
+class FactBook:
+    """Look up NPC stats, drops and recipes in index/facts.json."""
+
+    def __init__(self, path=FACTS):
+        if not path.exists():
+            raise FileNotFoundError(f"{path} is missing: run `uv run facts.py` first")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.npcs, self.recipes = {}, {}
+        for npc in data["npcs"]:  # by page (all forms of a boss) and by infobox name
+            if npc["page"].startswith("Guide:"):  # strategy guides repeat the boss infobox
+                continue
+            for name in {npc["page"].replace("_", " "), npc["name"]}:
+                self.npcs.setdefault(name.lower(), []).append(npc)
+        for recipe in data["recipes"]:
+            self.recipes.setdefault(recipe["result"].lower(), []).append(recipe)
+        names = set(self.npcs) | set(self.recipes)
+        # also written as one word ("moonlord", "kingslime"), as players often do
+        for table in (self.npcs, self.recipes):
+            for name in list(table):
+                if " " in name and len(name) > 8:
+                    table.setdefault(name.replace(" ", ""), table[name])
+        names = set(self.npcs) | set(self.recipes)
+        # longest first, so "Eye of Cthulhu" wins over "The Eye of Cthulhu" parts etc.
+        self.names = sorted(names, key=len, reverse=True)
+
+    def names_in(self, question):
+        """Known NPC/item names in the question, longest match first, no overlaps."""
+        q, found, taken = question.lower(), [], []
+        for name in self.names:
+            for m in re.finditer(rf"(?<![\w']){re.escape(name)}(?![\w])", q):
+                if not any(a < m.end() and m.start() < b for a, b in taken):
+                    found.append(name)
+                    taken.append(m.span())
+                    break
+        return found
+
+    def drops(self, name, mode=None):
+        boxes = [b for b in self.npcs.get(name.lower(), []) if b["drops"]]
+        if not boxes:
+            return None
+        lines = []
+        for box in _distinct(boxes):
+            lines.append(f"{box['name']} drops ({_modes_label(mode)}):")
+            for m in [mode] if mode else MODES:
+                lines.append(f"- {m.capitalize()}: {_drop_list(box, m)}")
+        return _source(boxes[0], "drops", "\n".join(lines))
+
+    def stats(self, name, mode=None):
+        boxes = [b for b in self.npcs.get(name.lower(), []) if b["stats"] or b["tags"]]
+        if not boxes:
+            return None
+        lines = []
+        for box in _distinct(boxes):
+            tags = "; ".join(f"{k}: {', '.join(v)}" for k, v in box["tags"].items())
+            head = f"{box['name']}{' (Hardmode only)' if box['hardmode_only'] else ''}"
+            lines.append(f"{head}: {tags}" if tags else head)
+            for key, values in box["stats"].items():
+                if any(values.values()):  # sound/immunity rows are icons only
+                    lines.append(f"- {key}: {_per_mode(values, mode)}")
+        return _source(boxes[0], "stats", "\n".join(lines))
+
+    def recipe(self, name):
+        recipes = self.recipes.get(name.lower(), [])
+        if not recipes:
+            return None
+        lines = [f"Recipes for {recipes[0]['result']}:"]
+        for r in recipes[:MAX_RECIPES]:
+            ingredients = ", ".join(f"{i['item']} ×{i['amount']}" for i in r["ingredients"])
+            made = f"{r['result']} ×{r['amount']}" if r["amount"] != "1" else r["result"]
+            where = r["station"] or "station not listed"
+            note = f" ({r['versions']})" if r["versions"] else ""
+            lines.append(f"- {made} = {ingredients} at {where}{note}")
+        if len(recipes) > MAX_RECIPES:
+            lines.append(f"- ... and {len(recipes) - MAX_RECIPES} more recipes")
+        return _source(recipes[0], "recipe", "\n".join(lines), subject=recipes[0]["result"])
+
+    def lookup(self, kind, name, mode=None):
+        """One tool call: kind is "drops", "stats" or "recipe"."""
+        if kind == "recipe":
+            return self.recipe(name)
+        return getattr(self, kind)(name, mode)
+
+    def for_question(self, question):
+        """Fact sources a question clearly asks for, without any model: a
+        known name plus a drops / stats / crafting keyword."""
+        mode, sources = asked_mode(question), []
+        for name in self.names_in(question):
+            if ASKS_DROPS.search(question):
+                sources.append(self.drops(name, mode))
+            if ASKS_STATS.search(question):
+                sources.append(self.stats(name, mode))
+            if ASKS_RECIPE.search(question):
+                sources.append(self.recipe(name))
+        unique = {s["id"]: s for s in sources if s}
+        return list(unique.values())
+
+
+def open_factbook(enabled=True):
+    """The FactBook, or None if switched off or not built yet (with a warning)."""
+    if not enabled:
+        return None
+    try:
+        return FactBook()
+    except FileNotFoundError as e:
+        log.warning(f"{e}; answering without fact sources")
+        return None
+
+
+def _distinct(boxes):
+    """Each infobox once (a box is indexed under its page and its own name)."""
+    seen, out = set(), []
+    for b in boxes:
+        key = (b["page"], b["name"])
+        if key not in seen:
+            seen.add(key)
+            out.append(b)
+    return out
+
+
+def _modes_label(mode):
+    return f"{mode.capitalize()} Mode" if mode else "per difficulty"
+
+
+def _per_mode(values, mode):
+    if mode:
+        return values.get(mode, "?")
+    distinct = {values.get(m) for m in MODES}
+    if len(distinct) == 1:
+        return values.get("classic") or next(iter(values.values()), "?")
+    return " / ".join(values.get(m, "-") for m in MODES) + " (Classic / Expert / Master)"
+
+
+def _drop_list(box, mode):
+    parts, group = [], None
+    for d in box["drops"]:
+        rate = d["rate"].get(mode)
+        if rate is None:
+            continue
+        item = d["item"] + (f" ({d['quantity']})" if d["quantity"] != "1" else "")
+        item += f" {rate}"
+        if d["condition"]:
+            item += f" [{d['condition']}]"
+        if d["from_treasure_bag"]:
+            item += " [in the Treasure Bag]"
+        if d["group"] and d["group"] != group:
+            parts.append(f"{d['group']}: {item}")
+        else:
+            parts.append(item)
+        group = d["group"]
+    return "; ".join(parts) or "nothing"
+
+
+def _source(entry, kind, body, subject=None):
+    """A fact source. subject: what it is about (a recipe's result), if not the
+    page it was read from ("Recipes/Work Bench" lists many results)."""
+    page = entry["page"].replace("_", " ").replace("%2F", "/")
+    subject = subject or page
+    return {"id": f"facts:{kind}:{subject}", "title": page, "sections": [page, f"{subject}: {kind} (from the wiki)"],
+            "kind": "facts", "url": entry["url"], "text": f"{subject} > {kind}\n{body}"}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--page", help="print the facts of one saved page (file name without .html.gz)")

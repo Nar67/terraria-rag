@@ -89,3 +89,55 @@ def test_station_from_listing_page():
       <tr><td class="result"><span class="i"><a title="Chair">Chair</a></span></td>
       <td class="ingredients"><ul><li><span class="i"><a title="Wood">Wood</a></span><span class="am">4</span></li></ul></td></tr></table>"""
     assert parse_page(table, "Recipes%2FWork_Bench")["recipes"][0]["station"] == "Work Bench"
+
+
+import json  # noqa: E402
+
+from facts import FactBook, asked_mode  # noqa: E402
+
+BOSS = {"name": "King Slime", "page": "King_Slime", "url": "u", "hardmode_only": False,
+        "tags": {"Type": ["Boss"]}, "coins": {},
+        "stats": {"Max Life": {"classic": "2000", "expert": "2800", "master": "3570"}, "Hurt": {}},
+        "drops": [{"item": "Solidifier", "quantity": "1", "condition": None, "rate": {"classic": "100%"},
+                   "group": None, "from_treasure_bag": False},
+                  {"item": "Royal Gel", "quantity": "1", "condition": None, "rate": {"expert": "100%", "master": "100%"},
+                   "group": None, "from_treasure_bag": True}]}
+GUIDE_COPY = {**BOSS, "page": "Guide:King_Slime_strategies"}
+RECIPE = {"result": "Suspicious Looking Eye", "amount": "1", "ingredients": [{"item": "Lens", "amount": "6"}],
+          "station": "Demon Altar or Crimson Altar", "versions": None, "page": "Lens", "url": "u"}
+
+
+@pytest.fixture
+def book(tmp_path):
+    path = tmp_path / "facts.json"
+    path.write_text(json.dumps({"npcs": [BOSS, GUIDE_COPY], "recipes": [RECIPE]}))
+    return FactBook(path)
+
+
+@pytest.mark.parametrize("question, ids", [
+    ("What does King Slime drop in Expert Mode?", ["facts:drops:King Slime"]),
+    ("what does kingslime drop", ["facts:drops:King Slime"]),           # written as one word
+    ("How much health does King Slime have?", ["facts:stats:King Slime"]),
+    ("How do I make a Suspicious Looking Eye?", ["facts:recipe:Suspicious Looking Eye"]),
+    ("How do I beat King Slime?", []),                                   # no drops/stats/crafting word
+    ("What does the Wall of Flesh drop?", []),                           # no facts for it
+])
+def test_for_question(book, question, ids):
+    assert [s["id"] for s in book.for_question(question)] == ids
+
+
+def test_fact_text(book):
+    drops = book.drops("King Slime", "expert")["text"]
+    assert "Royal Gel 100% [in the Treasure Bag]" in drops and "Solidifier" not in drops  # Classic only
+    assert drops.count("King Slime drops") == 1                    # the guide's copy of the infobox is skipped
+    stats = book.stats("king slime")["text"]
+    assert "2000 / 2800 / 3570 (Classic / Expert / Master)" in stats and "Hurt" not in stats
+    assert "Lens ×6 at Demon Altar or Crimson Altar" in book.recipe("Suspicious Looking Eye")["text"]
+
+
+@pytest.mark.parametrize("question, mode", [
+    ("King Slime drops in Expert Mode", "expert"), ("master mode health", "master"),
+    ("expert or master?", None), ("what does it drop", None),
+])
+def test_asked_mode(question, mode):
+    assert asked_mode(question) == mode

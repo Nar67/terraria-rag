@@ -119,13 +119,18 @@ def quote_in(quote, sources):
 
 def load_sources(collection, retrieved):
     """The chunks the answering model saw, in the same order and numbering."""
-    ids = [r["id"] for r in retrieved]
-    got = collection.get(ids=ids, include=["documents", "metadatas"])
-    by_id = dict(zip(got["ids"], zip(got["documents"], got["metadatas"])))
+    # Fact sources (facts.py) aren't in the index; eval.py saved their text.
+    stored = {r["id"]: r for r in retrieved if "text" in r}
+    ids = [r["id"] for r in retrieved if r["id"] not in stored]
+    got = collection.get(ids=ids, include=["documents", "metadatas"]) if ids else {"ids": []}
+    by_id = dict(zip(got["ids"], zip(got.get("documents", []), got.get("metadatas", []))))
     missing = [i for i in ids if i not in by_id]
     if missing:
         raise KeyError(f"{len(missing)} chunks of this run are not in the index any more (re-run eval.py)")
-    return [{"kind": by_id[i][1]["kind"], "url": by_id[i][1]["url"], "text": by_id[i][0]} for i in ids]
+    return [{"kind": stored[r["id"]]["kind"], "url": stored[r["id"]]["url"], "text": stored[r["id"]]["text"]}
+            if r["id"] in stored else
+            {"kind": by_id[r["id"]][1]["kind"], "url": by_id[r["id"]][1]["url"], "text": by_id[r["id"]][0]}
+            for r in retrieved]
 
 
 def judge_one(client, model, question, row, sources, think):

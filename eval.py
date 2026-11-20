@@ -188,6 +188,8 @@ def main():
     ap.add_argument("--max-tokens", type=int,
                     help="with --answers: output cap including reasoning (default: ask.py's, 1024 / 4096). "
                          "Overrides the Modelfile's num_predict for these requests.")
+    ap.add_argument("--no-facts", dest="facts", action="store_false",
+                    help="don't add fact sources (NPC stats, drops, recipes from facts.py)")
     ap.add_argument("--save", type=Path, help="write all results to this JSON file")
     add_logging_args(ap)
     args = ap.parse_args()
@@ -195,6 +197,8 @@ def main():
 
     questions = load_questions(args.questions, args.only)
     searcher = Searcher()
+    from facts import open_factbook
+    book = open_factbook(args.facts)
     client = model = planner = None
     if args.answers or args.agent:
         import openai  # noqa: F401  (fail early if missing)
@@ -222,14 +226,18 @@ def main():
     for q in questions:
         trace = None
         if args.agent:
-            results, trace = research(q["question"], searcher, client, planner, k=args.k)
+            results, trace = research(q["question"], searcher, client, planner, k=args.k, facts=book)
         else:
             results = searcher.search(q["question"], k=args.k, mode=args.mode, **knobs)
+            if book is not None:  # as ask.py: resolved stats/drops/recipes first
+                results = book.for_question(q["question"]) + results
         history_on = wants_history(q["question"])
         row = {"id": q["id"], "category": q["category"], "question": q["question"],
                "answerable": q.get("answerable", True), "history_on": history_on,
-               "retrieved": [{"id": r["id"], "title": r["title"], "kind": r["kind"],
-                              "sections": r["sections"]} for r in results]}
+               "retrieved": [{"id": r["id"], "title": r["title"], "kind": r["kind"], "sections": r["sections"],
+                              # fact sources aren't in the index: keep their text for judge.py
+                              **({"url": r["url"], "text": r["text"]} if r["kind"] == "facts" else {})}
+                             for r in results]}
         if row["answerable"]:
             row.update(score_retrieval(q, results))
             row["history_ok"] = history_on == bool(q.get("history"))
