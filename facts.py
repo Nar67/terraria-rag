@@ -266,6 +266,56 @@ def parse_conditions(md, page):
             "special_rules": "\n".join(special), "notes": notes}
 
 
+# Bosses and progression (phase 4). The Bosses page lists them by stage in
+# progression order; each boss page says when fighting it "is not required
+# for game progression" and has an Aftermath section with what the first kill
+# unlocks (the three mechanical bosses share theirs on "Mechanical bosses").
+OPTIONAL = re.compile(r"[^.\n]*\bnot required for (?:game )?progression[^.\n]*\.", re.I)
+MECHANICAL = {"The Twins", "The Destroyer", "Skeletron Prime"}
+MAX_AFTERMATH = 26  # lines; the mechanical bosses list "one" and "all three defeated"
+
+
+def parse_bosses(text_dir=TEXT_DIR):
+    """[{"name", "stage", "order", "optional", "optional_quote", "aftermath", "page", "url"}]"""
+    path = text_dir / "Bosses.md"
+    if not path.exists():
+        return []
+    bosses, stage = [], None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if m := re.match(r"## (.*)", line):
+            stage = m.group(1) if "bosses" in m.group(1).lower() or "boss" in m.group(1).lower() else None
+        elif (m := re.match(r"### (.*)", line)) and stage:
+            bosses.append({"name": m.group(1).strip(), "stage": stage})
+    for n, boss in enumerate(bosses):
+        page = boss["name"].replace(" ", "_")
+        md_path = text_dir / f"{page}.md"
+        md = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
+        optional = OPTIONAL.search(md)
+        aftermath_page = "Mechanical_bosses" if boss["name"] in MECHANICAL else page
+        aftermath_md = (text_dir / f"{aftermath_page}.md")
+        boss.update({
+            "order": n, "page": page, "url": page_url(page),
+            "optional": bool(optional), "optional_quote": optional.group(0).strip() if optional else None,
+            "aftermath": _aftermath(aftermath_md.read_text(encoding="utf-8")) if aftermath_md.exists() else [],
+        })
+    return bosses
+
+
+def _aftermath(md):
+    """The Aftermath section's lines (bullets and sub-headings), or []."""
+    lines = md.splitlines()
+    start = next((i for i, l in enumerate(lines) if re.match(r"## Aftermath", l)), None)
+    if start is None:
+        return []
+    out = []
+    for line in lines[start + 1:]:
+        if re.match(r"## ", line):
+            break
+        if line.strip():
+            out.append(re.sub(r"^#{3,4} ", "", line.rstrip()))
+    return out[:MAX_AFTERMATH]
+
+
 def build():
     files = sorted(HTML_DIR.glob("*.html.gz"))
     if not files:
@@ -304,6 +354,8 @@ def build():
             if entry:
                 facts["conditions"][page] = entry
     seen["pages with conditions"] = len(facts["conditions"])
+    facts["bosses"] = parse_bosses()
+    seen["bosses"] = len(facts["bosses"])
     FACTS.parent.mkdir(parents=True, exist_ok=True)
     tmp = FACTS.with_suffix(".json.part")
     tmp.write_text(json.dumps(facts, ensure_ascii=False), encoding="utf-8")
@@ -325,6 +377,12 @@ ASKS_CONDITIONS = re.compile(r"\b(spawn\w*|appear\w*|shows? up|show up|mov\w* in
                              r"start\w*|occur\w*|happen\w*)\b", re.I)
 MAX_CONDITIONS = 2500  # characters of one conditions source
 # "what comes / happens after X" is progression, not how X spawns
+ASKS_BOSS_LIST = re.compile(r"\b(which|what|list|every|optional|required)\b[^.?]*\bbosses\b|\bbosses\b[^.?]*\b(optional|required|order|list)\b", re.I)
+# "after beating X", "I've beaten X", "do I have to fight X to progress"
+ASKS_PROGRESSION = re.compile(r"\bafter (beating|defeating|killing)\b|(?<!do )\b(i|we)('ve| have)? (beat|beaten|killed|defeated)\b|"
+                              r"\b(have to|need to|must)\b[^.?]*\b(fight|beat|kill|defeat)\b|\bto progress\b", re.I)
+# "... but no Plantera's Bulb spawns, why?" is troubleshooting, not progression
+ASKS_WHY = re.compile(r"\bwhy\b|n't\b|\bdoes not\b|\bwill not\b", re.I)
 ASKS_WHATS_NEXT = re.compile(r"\b(what (comes|happens|now|next)|next|after (i|you) (kill|beat|defeat))", re.I)
 # page names that are also everyday words of the questions themselves
 GENERIC_NAMES = {"spawn", "summon", "craft", "crafting", "drop", "drops", "loot", "recipe", "recipes",
@@ -355,13 +413,18 @@ class FactBook:
         for recipe in data["recipes"]:
             self.recipes.setdefault(recipe["result"].lower(), []).append(recipe)
         self.conditions_by = {page.replace("_", " ").lower(): c for page, c in data.get("conditions", {}).items()}
+        self.bosses = data.get("bosses", [])
+        self.boss_by = {b["name"].lower(): b for b in self.bosses}
+        if "the twins" in self.boss_by:  # the three share one page and one Aftermath
+            self.boss_by.setdefault("mechanical bosses", {**self.boss_by["the twins"], "name": "Mechanical bosses",
+                                                         "page": "Mechanical_bosses", "url": page_url("Mechanical_bosses")})
         names = set(self.npcs) | set(self.recipes)
         # also written as one word ("moonlord", "kingslime"), as players often do
         for table in (self.npcs, self.recipes, self.conditions_by):
             for name in list(table):
                 if " " in name and len(name) > 8:
                     table.setdefault(name.replace(" ", ""), table[name])
-        names = (set(self.npcs) | set(self.recipes) | set(self.conditions_by)) - GENERIC_NAMES
+        names = (set(self.npcs) | set(self.recipes) | set(self.conditions_by) | set(self.boss_by)) - GENERIC_NAMES
         # longest first, so "Eye of Cthulhu" wins over "The Eye of Cthulhu" parts etc.
         self.names = sorted(names, key=len, reverse=True)
 
@@ -442,9 +505,60 @@ class FactBook:
         entry = cond or boxes[0]
         return _source(entry, "conditions", "\n".join(lines)[:MAX_CONDITIONS])
 
+    def boss_list(self, stage=None):
+        """The bosses by stage in the wiki's progression order, each marked
+        optional (quoting its page) or not. stage: "pre-hardmode",
+        "hardmode", "event" or None for all."""
+        if not self.bosses:
+            return None
+        lines = ["Bosses on the wiki's Bosses page, in progression order. \"optional\" = its page says "
+                 "fighting it is not required for game progression; the others are on the main path."]
+        for stage_name in dict.fromkeys(b["stage"] for b in self.bosses):
+            if stage and not _stage_matches(stage_name, stage):
+                continue
+            items = []
+            for b in (x for x in self.bosses if x["stage"] == stage_name):
+                if "event" in stage_name.lower() or "seed" in stage_name.lower():
+                    items.append(f"- {b['name']}")
+                elif b["optional"]:
+                    items.append(f"- {b['name']}: optional (\"{b['optional_quote']}\")")
+                else:
+                    items.append(f"- {b['name']}: on the main path")
+            lines.append(f"{stage_name}:\n" + "\n".join(items))
+        src = _source({"page": "Bosses", "url": page_url("Bosses")}, "boss list", "\n".join(lines))
+        if stage:
+            src["id"] += f" ({stage})"
+        return src
+
+    def progression(self, name):
+        """What defeating a boss unlocks (its Aftermath) and which bosses come
+        next on the wiki's list, marked optional or on the main path."""
+        boss = self.boss_by.get(name.lower())
+        if boss is None or "event" in boss["stage"].lower():
+            return None
+        status = "optional" if boss["optional"] else "on the main path"
+        lines = [f"{boss['name']} ({boss['stage'].removesuffix(' bosses')}, {status})."]
+        if boss["aftermath"]:
+            lines.append("After the first kill (Aftermath):\n" + "\n".join(boss["aftermath"]))
+        main = [b for b in self.bosses if "event" not in b["stage"].lower() and "seed" not in b["stage"].lower()]
+        later = [b for b in main if b["order"] > boss["order"]]
+        upcoming, required = [], 0
+        for b in later:  # up to and including the next two bosses on the main path
+            upcoming.append(f"- {b['name']} ({b['stage'].removesuffix(' bosses')}, "
+                            f"{'optional' if b['optional'] else 'on the main path'})")
+            required += not b["optional"] and b["name"] not in MECHANICAL | {"Brain of Cthulhu"}
+            if required >= 2:
+                break
+        if upcoming:
+            lines.append("Next on the wiki's boss list, in order:\n" + "\n".join(upcoming))
+        return _source(boss, "progression", "\n".join(lines))
+
     def lookup(self, kind, name, mode=None):
-        """One tool call: kind is "drops", "stats", "recipe" or "conditions"."""
-        if kind in ("recipe", "conditions"):
+        """One tool call: kind is "drops", "stats", "recipe", "conditions",
+        "progression" or "bosses" (name = stage or "all")."""
+        if kind == "bosses":
+            return self.boss_list(None if name.lower() in ("", "all") else name)
+        if kind in ("recipe", "conditions", "progression"):
             return getattr(self, kind)(name)
         return getattr(self, kind)(name, mode)
 
@@ -452,6 +566,13 @@ class FactBook:
         """Fact sources a question clearly asks for, without any model: a
         known name plus a drops / stats / crafting keyword."""
         mode, sources = asked_mode(question), []
+        if ASKS_BOSS_LIST.search(question):
+            q = question.lower()
+            stage = "pre-hardmode" if re.search(r"pre[- ]?hard ?mode", q) else "hardmode" if "hardmode" in q.replace(" ", "") else None
+            sources.append(self.boss_list(stage))
+        if (ASKS_WHATS_NEXT.search(question) or ASKS_PROGRESSION.search(question)) and not ASKS_WHY.search(question):
+            for name in self.names_in(question):
+                sources.append(self.progression(name))
         for name in self.names_in(question):
             if ASKS_DROPS.search(question):
                 sources.append(self.drops(name, mode))
@@ -474,6 +595,15 @@ def open_factbook(enabled=True):
     except FileNotFoundError as e:
         log.warning(f"{e}; answering without fact sources")
         return None
+
+
+def _stage_matches(stage_name, stage):
+    name, stage = stage_name.lower(), stage.lower().replace(" ", "")
+    if stage.startswith("pre"):
+        return name.startswith("pre")
+    if stage == "hardmode":
+        return name.startswith("hardmode")
+    return stage in name.replace(" ", "")
 
 
 def _distinct(boxes):

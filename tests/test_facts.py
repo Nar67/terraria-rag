@@ -110,7 +110,14 @@ RECIPE = {"result": "Suspicious Looking Eye", "amount": "1", "ingredients": [{"i
 @pytest.fixture
 def book(tmp_path):
     path = tmp_path / "facts.json"
-    path.write_text(json.dumps({"npcs": [BOSS, GUIDE_COPY], "recipes": [RECIPE]}))
+    bosses = [{"name": n, "stage": st, "order": i, "page": n.replace(" ", "_"), "url": "u", "optional": opt,
+               "optional_quote": f"Fighting {n} is not required for game progression." if opt else None,
+               "aftermath": [f"- {n} unlocks something."]}
+              for i, (n, st, opt) in enumerate([("King Slime", "Pre-Hardmode bosses", True),
+                                                ("Skeletron", "Pre-Hardmode bosses", False),
+                                                ("Queen Slime", "Hardmode bosses", True),
+                                                ("Plantera", "Hardmode bosses", False)])]
+    path.write_text(json.dumps({"npcs": [BOSS, GUIDE_COPY], "recipes": [RECIPE], "bosses": bosses}))
     return FactBook(path)
 
 
@@ -185,3 +192,40 @@ def test_parse_conditions():
 ])
 def test_conditions_trigger(book, question, wanted):
     assert any(s["id"].startswith("facts:conditions") for s in book.for_question(question)) is wanted
+
+
+from facts import parse_bosses  # noqa: E402
+
+
+def test_parse_bosses(tmp_path):
+    (tmp_path / "Bosses.md").write_text("## Pre-Hardmode bosses\n### King Slime\n### Skeletron\n## Hardmode bosses\n### The Twins\n## Notes\n### Not a boss\n")
+    (tmp_path / "King_Slime.md").write_text("Fighting King Slime is not required for game progression, but fun.\n## Aftermath\n- Slime Rain can drop items.\n## Notes\n- x\n")
+    (tmp_path / "Skeletron.md").write_text("Skeletron guards the Dungeon.\n## Aftermath\n- The Dungeon opens.\n")
+    (tmp_path / "Mechanical_bosses.md").write_text("## Aftermath\n### One boss defeated\n- Steampunker moves in.\n")
+    bosses = {b["name"]: b for b in parse_bosses(tmp_path)}
+    assert list(bosses) == ["King Slime", "Skeletron", "The Twins"]           # "Notes" isn't a stage
+    assert bosses["King Slime"]["optional"] and not bosses["Skeletron"]["optional"]
+    assert bosses["King Slime"]["optional_quote"].startswith("Fighting King Slime is not required")
+    assert bosses["Skeletron"]["aftermath"] == ["- The Dungeon opens."]
+    assert bosses["The Twins"]["aftermath"] == ["One boss defeated", "- Steampunker moves in."]  # shared page
+
+
+@pytest.mark.parametrize("question, ids", [
+    ("Which Hardmode bosses are optional?", ["facts:boss list:Bosses (hardmode)"]),
+    ("What are the optional bosses in pre-Hardmode?", ["facts:boss list:Bosses (pre-hardmode)"]),
+    ("What should I do after beating Skeletron?", ["facts:progression:Skeletron"]),
+    ("I beat King Slime, what should I do next?", ["facts:progression:King Slime"]),
+    ("Do I have to fight Queen Slime to progress?", ["facts:progression:Queen Slime"]),
+    ("I killed all three bosses but Plantera won't come, why?", []),   # troubleshooting, not progression
+])
+def test_progression_and_boss_list_triggers(book, question, ids):
+    got = [s["id"] for s in book.for_question(question) if "progression" in s["id"] or "boss list" in s["id"]]
+    assert got == ids
+
+
+def test_boss_list_and_progression_text(book):
+    hardmode = book.boss_list("hardmode")["text"]
+    assert "Queen Slime: optional (\"Fighting Queen Slime is not required" in hardmode
+    assert "Plantera: on the main path" in hardmode and "King Slime" not in hardmode
+    after = book.progression("Skeletron")["text"]
+    assert "- Skeletron unlocks something." in after and "- Queen Slime (Hardmode, optional)" in after
